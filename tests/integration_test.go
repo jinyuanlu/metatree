@@ -231,18 +231,12 @@ func TestNewCreatesWorktreeAndPane(t *testing.T) {
 		"MT_REPO="+f.repoPath,
 		"MT_BRANCH=feature",
 	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	// give it time to create worktree+pane (well over the spec.md §2.7.1 ≤5s)
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "feature")); err == nil {
-			break
-		}
-		mustSleep(t, 100)
-	}
-	_ = cmd.Process.Kill()
-	_, _ = cmd.Process.Wait()
+	// Run mt to completion. It exits non-zero when tmux attach fails
+	// (no TTY in CI) — that's expected. Killing on "worktree dir
+	// lands" raced past MarkPane on faster runners and the test then
+	// observed a pane without @mt-managed. cmd.Run also joins I/O
+	// goroutines, so any captured output is safe to read after.
+	_ = cmd.Run()
 
 	// 1) worktree dir exists
 	if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "feature")); err != nil {
