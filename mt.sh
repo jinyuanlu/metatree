@@ -144,6 +144,16 @@ ensure_dashboard() {
     tmux new-window -t "$MT_TMUX_SESSION:" -n "$MT_TMUX_WINDOW"
   fi
   tmux set-window-option -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" pane-border-status top 2>/dev/null || true
+
+  # Auto-install popup bindings if they're missing on this tmux server.
+  # Server restarts wipe bindings; this restores them on the next mt
+  # invocation that touches a dashboard. One-line notice on first install
+  # so the user knows where prefix+g came from.
+  if ! _bindings_installed; then
+    if _install_bindings; then
+      printf 'mt: installed prefix+g/G/N/R bindings on this tmux server\n' >&2
+    fi
+  fi
 }
 
 find_pane() {
@@ -213,6 +223,22 @@ QUICK CHECKS
 EOF
 }
 
+# Install (or refresh) the four popup bindings on the running tmux server.
+# Returns 0 on success, 1 if tmux call fails. Silent — no output.
+_install_bindings() {
+  local mt; mt=$(mt_self_path)
+  tmux bind-key g display-popup -w 80% -h 60% -E "$mt switch -z" 2>/dev/null || return 1
+  tmux bind-key G display-popup -w 80% -h 60% -E "$mt switch"    2>/dev/null
+  tmux bind-key N display-popup -w 80% -h 60% -E "$mt new"       2>/dev/null
+  tmux bind-key R display-popup -w 80% -h 60% -E "$mt rm"        2>/dev/null
+}
+
+# True iff our bindings are already installed on the running tmux server.
+_bindings_installed() {
+  tmux list-keys -T prefix 2>/dev/null \
+    | grep -qE '^bind-key[[:space:]]+-T prefix[[:space:]]+g[[:space:]].*display-popup'
+}
+
 cmd_bind() {
   tmux has-session 2>/dev/null \
     || die "tmux server not running; start with: tmux new -d -s $MT_TMUX_SESSION"
@@ -223,14 +249,7 @@ cmd_bind() {
   # do nothing when invoked.
   local mt; mt=$(mt_self_path)
 
-  # Bindings reachable from inside an agent (Claude/Ollama) — the prefix
-  # is intercepted by tmux before it reaches the pane, so the agent never
-  # sees the keystrokes. display-popup -E runs mt in an overlay window
-  # and exits when the command returns; the agent stays focused.
-  tmux bind-key g display-popup -w 80% -h 60% -E "$mt switch -z"
-  tmux bind-key G display-popup -w 80% -h 60% -E "$mt switch"
-  tmux bind-key N display-popup -w 80% -h 60% -E "$mt new"
-  tmux bind-key R display-popup -w 80% -h 60% -E "$mt rm"
+  _install_bindings || die "failed to install bindings (tmux 3.2+ required for display-popup)"
 
   cat <<EOF
 mt keybindings set on the running tmux server (absolute-path form):
