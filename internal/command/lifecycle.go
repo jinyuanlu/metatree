@@ -152,7 +152,14 @@ func RunNew(env *Env, args []string) error {
 			return ExitWith(1, "list panes: %v", err)
 		}
 		first := panes[0].ID
-		keys := fmt.Sprintf("cd %s && exec %s", worktreePath, cmd)
+		// Note: we deliberately do NOT use `exec <cmd>` here. In bash and
+		// zsh, `exec <name>` is a special-builtin form that does not
+		// trigger alias expansion on its argument — so `exec claude`
+		// would bypass the user's `alias claude='claude --mcp-config ...'`
+		// and load the bare binary. Run `<cmd>` plainly so the alias
+		// expands, then `; exit` so the pane still closes when the
+		// agent exits (matching the previous `exec`-based behavior).
+		keys := fmt.Sprintf("cd %s && %s; exit", worktreePath, cmd)
 		if err := tmuxio.SendKeys(first, keys); err != nil {
 			return ExitWith(1, "send-keys: %v", err)
 		}
@@ -160,8 +167,23 @@ func RunNew(env *Env, args []string) error {
 			return ExitWith(1, "mark pane: %v", err)
 		}
 	} else {
-		// Subsequent sessions: split-window with the agent as the cmd
-		newPane, err := tmuxio.SplitPane(env.Target(), worktreePath, cmd)
+		// Subsequent sessions: split-window with the agent as the cmd.
+		//
+		// tmux split-window dispatches its cmd through /bin/sh -c, which
+		// is non-interactive and never sources the user's rcfile. Wrap
+		// in `$SHELL -ic 'exec <cmd>'` so aliases for claude_cmd /
+		// ollama_cmd expand here the same way they do in pane #1 (which
+		// is fed via send-keys into a live interactive shell). See
+		// wrapAgentCmd in launch.go for the full rationale.
+		launchCmd, recognized := wrapAgentCmd(cmd)
+		if !recognized {
+			fmt.Fprintf(env.Stderr,
+				"mt: $SHELL=%s not recognized; aliases in claude_cmd/ollama_cmd will not expand.\n"+
+					"    To inject flags reliably, set the literal command in ~/.config/mt/config.toml — e.g.\n"+
+					"        claude_cmd = \"claude --mcp-config $HOME/.claude/mcp.json\"\n",
+				shellOrUnset())
+		}
+		newPane, err := tmuxio.SplitPane(env.Target(), worktreePath, launchCmd)
 		if err != nil {
 			return ExitWith(1, "split-window: %v", err)
 		}

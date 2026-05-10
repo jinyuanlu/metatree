@@ -274,6 +274,239 @@ func TestAuthInvariantNoCredentialRefs(t *testing.T) {
 	}
 }
 
+// TestAliasExpansionInSubsequentPane verifies the fix for the silent
+// MCP-loss bug: when the user has aliased `claude` (e.g. to inject
+// `--mcp-config $HOME/.claude/mcp.json`), every pane mt creates must
+// honor that alias — including the second-and-later panes that go
+// through `tmux split-window` (path 2 in lifecycle.go).
+//
+// Before the fix: tmux split-window dispatched the cmd through
+// `/bin/sh -c`, which is non-interactive and never sourced ~/.bashrc,
+// so aliases were silently dropped on pane #2+. The first pane (fed
+// via send-keys into a live shell) was unaffected, so the bug was
+// asymmetric and easy to miss.
+//
+// This test sets up two stubs:
+//   - bin/claude       writes "PATH-CLAUDE: <argv>" to a log file
+//   - bin/agent-stub   writes "ALIASED: <argv>"     to the same log
+//
+// And a fixture rcfile that aliases `claude` → `agent-stub --injected-flag`.
+// If alias expansion works in pane #2, the log contains "ALIASED:
+// --injected-flag". If the fix regresses, the log contains
+// "PATH-CLAUDE:" with no flag.
+//
+// Skipped automatically on systems without bash, which is essentially
+// no system mt targets — but keep the skip so a stripped CI image
+// doesn't spuriously fail.
+func TestAliasExpansionInSubsequentPane(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available; skipping alias-expansion integration test")
+	}
+
+	f := setup(t)
+
+	// Build the two stubs. The stub stays alive (sleep 30) so the pane
+	// process exists long enough for `tmux list-panes` and friends.
+	binDir := filepath.Join(f.tmp, "bin")
+	mustWrite(t, filepath.Join(binDir, "claude"),
+		"#!/bin/sh\n"+
+			fmt.Sprintf(`echo "PATH-CLAUDE: $*" >> %q`+"\n", filepath.Join(f.tmp, "argv.log"))+
+			"sleep 30\n")
+	mustWrite(t, filepath.Join(binDir, "agent-stub"),
+		"#!/bin/sh\n"+
+			fmt.Sprintf(`echo "ALIASED: $*" >> %q`+"\n", filepath.Join(f.tmp, "argv.log"))+
+			"sleep 30\n")
+	for _, name := range []string{"claude", "agent-stub"} {
+		if err := os.Chmod(filepath.Join(binDir, name), 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", name, err)
+		}
+	}
+
+	// Fake $HOME with rcfiles that alias `claude`. Write the alias to
+	// every bash startup file we can think of: tmux may start the pane
+	// shell as a login shell (reads .bash_profile), my fix uses bash -ic
+	// (reads .bashrc), and Apple Terminal-style configs sometimes source
+	// .profile. Belt-and-braces: same alias in all three, plus a
+	// sentinel so a debug failure is diagnosable.
+	fakeHome := filepath.Join(f.tmp, "home")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	rcBody := fmt.Sprintf(
+		"echo SOURCED-%%s >> %q\n"+
+			"alias claude='%s --injected-flag'\n",
+		filepath.Join(f.tmp, "rc.log"),
+		filepath.Join(binDir, "agent-stub"))
+	for _, name := range []string{".bashrc", ".bash_profile", ".profile"} {
+		mustWrite(t, filepath.Join(fakeHome, name),
+			fmt.Sprintf(rcBody, name))
+	}
+
+	// Spawn pane #1 (path 1: send-keys into existing shell). Branch "first".
+	// We rely on the same start+wait+kill pattern as TestNewCreatesWorktreeAndPane.
+	// Inherit the parent env (we need tmux/git on PATH); override HOME, SHELL,
+	// and prepend binDir so the stub `claude` resolves before any real one.
+	runMtNew := func(branch string) {
+		cmd := exec.Command(f.mtBin, "new", "--with", "claude")
+		env := append([]string{}, os.Environ()...)
+		// Override HOME and SHELL so bash sources our fixture .bashrc.
+		env = withEnv(env, "HOME", fakeHome)
+		env = withEnv(env, "SHELL", bashPath)
+		env = withEnv(env, "PATH", binDir+":"+os.Getenv("PATH"))
+		// zsh-style ZDOTDIR could redirect rcfile lookup; clear it.
+		env = withEnv(env, "ZDOTDIR", "")
+		// mt fixture overrides
+		env = append(env,
+			"MT_CONFIG="+f.configPath,
+			"TMUX_TMPDIR="+f.tmuxSock,
+			"TMUX=",
+			"MT_REPO="+f.repoPath,
+			"MT_BRANCH="+branch,
+		)
+		cmd.Env = env
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		defer func() {
+			if s := stderr.String(); s != "" {
+				t.Logf("[mt new %s] stderr:\n%s", branch, s)
+			}
+		}()
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start mt new %s: %v", branch, err)
+		}
+		// wait until the worktree dir lands
+		for i := 0; i < 50; i++ {
+			if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", branch)); err == nil {
+				break
+			}
+			mustSleep(t, 100)
+		}
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}
+
+	// Override claude_cmd to the bare name `claude` so the alias has
+	// something to expand (the default config in setup() points it at
+	// "cat" for the other tests).
+	mustWrite(t, f.configPath, fmt.Sprintf(`repos = ["%s"]
+tmux_session = "mt-itest"
+tmux_window = "dashboard"
+branch_prefix = "itest"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "claude"
+auto_direnv_allow = false
+auto_status_chrome = false
+`, f.repoPath))
+
+	runMtNew("first")
+	runMtNew("second")
+
+	// Wait for both stubs to have written to the log. Two lines expected.
+	logPath := filepath.Join(f.tmp, "argv.log")
+	var logBytes []byte
+	for i := 0; i < 50; i++ {
+		b, err := os.ReadFile(logPath)
+		if err == nil && bytes.Count(b, []byte("\n")) >= 2 {
+			logBytes = b
+			break
+		}
+		mustSleep(t, 100)
+	}
+	if len(logBytes) == 0 {
+		t.Fatalf("argv.log never received both stub writes; got: %q", logBytes)
+	}
+	log := string(logBytes)
+
+	// The alias must have fired in BOTH panes. Two ALIASED lines, zero
+	// PATH-CLAUDE lines, and the injected flag must appear twice.
+	aliasedCount := strings.Count(log, "ALIASED: --injected-flag")
+	pathCount := strings.Count(log, "PATH-CLAUDE:")
+	if aliasedCount != 2 || pathCount != 0 {
+		// On failure, dump rc.log + tmux pane state so the failure mode
+		// is diagnosable from CI logs without re-running locally.
+		rcLog, _ := os.ReadFile(filepath.Join(f.tmp, "rc.log"))
+		t.Logf("rc.log:\n%s", rcLog)
+		listPanes := exec.Command("tmux", "list-panes",
+			"-t", "mt-itest:dashboard",
+			"-F", "#{pane_id} cmd=#{pane_current_command}")
+		listPanes.Env = append(os.Environ(), "TMUX_TMPDIR="+f.tmuxSock, "TMUX=")
+		paneCmds, _ := listPanes.Output()
+		t.Logf("tmux panes:\n%s", paneCmds)
+		t.Errorf("alias expansion broken in some pane.\n"+
+			"  expected: 2x ALIASED, 0x PATH-CLAUDE\n"+
+			"  got:      %dx ALIASED, %dx PATH-CLAUDE\n"+
+			"  argv.log:\n%s", aliasedCount, pathCount, log)
+	}
+}
+
+// TestUnknownShellWarningEmitted verifies that when $SHELL is something
+// mt doesn't know how to wrap (nu, pwsh, dash, …), pane #2 creation
+// emits the documented warning to stderr that points the user at
+// claude_cmd in config.toml.
+//
+// The warning is the only signal the user has that aliases are silently
+// not expanding, so its presence is load-bearing — keep this test
+// strict on the substring.
+func TestUnknownShellWarningEmitted(t *testing.T) {
+	f := setup(t)
+
+	// First pane primes the dashboard (path 1, no warning expected).
+	cmd1 := exec.Command(f.mtBin, "new", "--with", "claude")
+	cmd1.Env = append(os.Environ(),
+		"MT_CONFIG="+f.configPath,
+		"TMUX_TMPDIR="+f.tmuxSock,
+		"TMUX=",
+		"MT_REPO="+f.repoPath,
+		"MT_BRANCH=first",
+		"SHELL=/usr/local/bin/nu",
+	)
+	if err := cmd1.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "first")); err == nil {
+			break
+		}
+		mustSleep(t, 100)
+	}
+	_ = cmd1.Process.Kill()
+	_, _ = cmd1.Process.Wait()
+
+	// Second pane goes through path 2 — the warning should fire here.
+	cmd2 := exec.Command(f.mtBin, "new", "--with", "claude")
+	cmd2.Env = append(os.Environ(),
+		"MT_CONFIG="+f.configPath,
+		"TMUX_TMPDIR="+f.tmuxSock,
+		"TMUX=",
+		"MT_REPO="+f.repoPath,
+		"MT_BRANCH=second",
+		"SHELL=/usr/local/bin/nu",
+	)
+	var stderr bytes.Buffer
+	cmd2.Stderr = &stderr
+	if err := cmd2.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "second")); err == nil {
+			break
+		}
+		mustSleep(t, 100)
+	}
+	_ = cmd2.Process.Kill()
+	_, _ = cmd2.Process.Wait()
+
+	out := stderr.String()
+	if !strings.Contains(out, "$SHELL=/usr/local/bin/nu not recognized") {
+		t.Errorf("expected unknown-shell warning naming nu, got stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "claude_cmd") || !strings.Contains(out, "config.toml") {
+		t.Errorf("warning should point at claude_cmd in config.toml, got:\n%s", out)
+	}
+}
+
 // helpers —
 
 func mustRun(t *testing.T, cwd string, name string, args ...string) {
@@ -295,6 +528,18 @@ func mustWrite(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+// withEnv returns env with key=value, replacing any existing entry for key.
+func withEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	out := env[:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, prefix) {
+			out = append(out, kv)
+		}
+	}
+	return append(out, prefix+value)
 }
 
 func mustSleep(t *testing.T, ms int) {

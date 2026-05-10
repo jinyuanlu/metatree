@@ -298,6 +298,19 @@ ollama_cmd = "ollama run {model}"
 auto_direnv_allow = "true"
 ```
 
+### 2.6.1 Agent-launch contract
+
+`mt` does not invoke `claude_cmd` / `ollama_cmd` as a bare subprocess. Both forms below MUST run the agent through the user's interactive shell so that any alias for the agent (e.g. `alias claude='claude --mcp-config ~/.claude/mcp.json'`) is honored and contributes its flags:
+
+- **First pane** (the bare-shell pane tmux gave us at session creation): `mt` uses `tmux send-keys` to type `cd <worktree> && <claude_cmd>; exit` into the pane. The existing interactive shell expands the alias before running. The trailing `; exit` ensures the pane closes when the agent exits.
+- **Subsequent panes** (created via `tmux split-window`): `mt` wraps the agent command as `$SHELL -ic '<claude_cmd>'`. tmux otherwise dispatches `split-window`'s command argument through `/bin/sh -c`, which is non-interactive and never sources the user's rcfile, so the alias would be silently lost.
+
+The wrap is **only applied** when `$SHELL` resolves (via `filepath.Base`) to `bash`, `zsh`, or `fish`. For any other shell — nushell, PowerShell, dash, busybox `ash`, or an unset `$SHELL` — `mt` passes the command through unchanged (no regression vs. the pre-contract behavior) and emits a one-line warning to stderr pointing the user at `claude_cmd` in `~/.config/mt/config.toml`. Setting `claude_cmd = "claude --mcp-config $HOME/.claude/mcp.json"` is honored verbatim regardless of shell.
+
+**The wrap MUST NOT prefix the inner command with `exec`.** In both bash and zsh, `exec <name>` is a special-builtin form that does not perform alias expansion on its argument — using it defeats the entire reason this contract exists. The `-c` shell exits with the inner command's status when it finishes, so the pane still closes when the agent exits without needing `exec`.
+
+This contract preserves §1.4 (auth invariant): `mt ∉ ancestors(claude)` because `mt` exited long before `claude` started, and `parent(claude)` is the interactive login shell of the pane — observationally identical to `cd <repo> && claude` typed at a shell prompt.
+
 ### 2.7 Acceptance criteria
 
 V1 is complete when, on a clean install:
@@ -311,6 +324,7 @@ V1 is complete when, on a clean install:
 7. `pgrep mt` returns no PIDs ten seconds after any invocation completes.
 8. `~/.claude/.credentials.json` is byte-identical before and after a `mt new --with claude` invocation. (Confirms §1.4.)
 9. Works in Terminal.app default profile with no configuration changes (tmux 3.x, bash 3.2+, fzf, git ≥ 2.5). No truecolor, no Nerd Font, no special keybindings required.
+10. **Alias contract (§2.6.1).** With `alias claude='claude --injected-flag'` defined in the user's bash/zsh/fish rcfile, two consecutive `mt new` invocations produce two panes whose `claude` processes both have `--injected-flag` in `argv` — verifying that alias expansion fires identically on the first pane (send-keys path) and every subsequent pane (split-window-with-wrap path).
 
 ### 2.8 Failure modes
 

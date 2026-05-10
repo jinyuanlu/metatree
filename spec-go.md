@@ -558,6 +558,31 @@ func main() {
 }
 ```
 
+### Agent launch wrapping (spec.md §2.6.1)
+
+The two pane-creation paths in `RunNew` (`internal/command/lifecycle.go`)
+must keep `claude_cmd` / `ollama_cmd` alias-expansion equivalent:
+
+- **Path 1** (first pane, `managedCount == 0`): build the keystroke
+  string as `cd <wt> && <cmd>; exit` (no `exec`). The trailing `; exit`
+  closes the pane on agent exit.
+- **Path 2** (subsequent panes): pass `cmd` through `wrapAgentCmd` in
+  `internal/command/launch.go`, which yields `$SHELL -ic '<cmd>'` for
+  recognized shells (bash/zsh/fish) and the unwrapped `cmd` otherwise.
+  Recognized=false MUST emit a one-line stderr warning pointing at
+  `claude_cmd` in `~/.config/mt/config.toml`.
+
+**Do not prefix the inner command with `exec`.** Bash and zsh treat
+`exec <name>` as a special-builtin form that bypasses alias expansion
+on its argument — using it silently defeats the entire contract. The
+`-c` shell exits with the inner command's status when it finishes, so
+the pane closes correctly without `exec`.
+
+The wrap construction lives in `command/launch.go`, not `tmuxio/`,
+because `tmuxio` is forbidden from knowing what shell command it
+invokes (anti-pattern §17.1). `tmuxio.SplitPane` keeps its opaque-cmd
+contract — `command/` decides what goes in.
+
 ### Adding a new subcommand
 
 1. Add `func Run<Name>(env *Env, args []string) error` to the appropriate
