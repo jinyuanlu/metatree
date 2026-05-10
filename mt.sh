@@ -156,10 +156,23 @@ ensure_dashboard() {
   fi
 }
 
+# Find a pane by mt's stable marker, NOT pane_title (which agents like
+# Claude Code routinely overwrite via OSC 2 escape sequences with their cwd).
+# The @mt-managed user option is set on every mt-created pane and can't be
+# clobbered from inside the pane.
 find_pane() {
   tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
-    -F '#{pane_id} #{pane_title}' 2>/dev/null \
-    | awk -v t="$1" '$2 == t {print $1; exit}'
+    -F '#{pane_id}|#{@mt-managed}' 2>/dev/null \
+    | awk -F'|' -v t="$1" '$2 == t {print $1; exit}'
+}
+
+# Mark a pane as mt-managed: visible pane border title (informational, may
+# get overwritten by the agent) AND a stable @mt-managed user option (the
+# real source of truth for mt_pane_count, find_pane, and switch listings).
+mark_pane() {
+  local pane_id="$1" title="$2"
+  tmux select-pane -t "$pane_id" -T "$title" 2>/dev/null || true
+  tmux set-option -p -t "$pane_id" '@mt-managed' "$title" 2>/dev/null || true
 }
 
 attach_dashboard() {
@@ -289,8 +302,11 @@ cmd_switch() {
   #   dead  → title | dead | worktree_path  (selecting it: revive via mt new)
   ensure_dashboard
   local live_entries dead_entries
+  # mt-managed panes only — skip bare shells and any external panes the user
+  # may have split off. Display the @mt-managed value (stable; not OSC-clobbered).
   live_entries=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
-    -F '#{pane_title}|live|#{pane_id}' 2>/dev/null)
+    -F '#{@mt-managed}|live|#{pane_id}' 2>/dev/null \
+    | grep -v '^|')
   # dead = worktrees on disk with no matching live pane on this dashboard
   dead_entries=$(cmd_ls 2>/dev/null \
     | awk '$NF == "dead" { printf "%s|dead|%s\n", $1, $2 }')
@@ -470,22 +486,24 @@ cmd_new() {
   esac
 
   # Reuse the bare-shell pane if this is the first mt-managed session in the
-  # dashboard. We detect "bare-shell" by checking whether ANY existing pane
-  # has an mt-shaped title (`<repo>:<branch>`). If none do, the dashboard
-  # only contains the pane tmux gave us at session creation — reuse it.
+  # dashboard. Detection uses the @mt-managed tmux user option, NOT pane_title
+  # (agents like Claude Code overwrite pane_title via OSC 2 escape sequences
+  # with their cwd; @mt-managed is set by mt and can't be clobbered).
   local mt_pane_count
   mt_pane_count=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
-    -F '#{pane_title}' 2>/dev/null \
-    | grep -cE '^[^:[:space:]]+:[a-z0-9-]+$' || true)
+    -F '#{@mt-managed}' 2>/dev/null \
+    | grep -c '.' || true)
 
   if [[ "$mt_pane_count" -eq 0 ]]; then
     local first_pane
     first_pane=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" -F '#{pane_id}' | head -1)
     tmux send-keys -t "$first_pane" "cd $worktree_path && exec $cmd" Enter
-    tmux select-pane -t "$first_pane" -T "$title"
+    mark_pane "$first_pane" "$title"
   else
     tmux split-window -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" -c "$worktree_path" "$cmd"
-    tmux select-pane -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" -T "$title"
+    local new_pane
+    new_pane=$(tmux display-message -p -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" '#{pane_id}')
+    mark_pane "$new_pane" "$title"
     tmux select-layout -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" tiled
   fi
   attach_dashboard
@@ -499,6 +517,7 @@ cmd_ls() {
       [[ -d "$wt" ]] || continue
       branch=$(basename "$wt")
       title=$(pane_title "$repo" "$branch")
+      # find_pane uses @mt-managed (stable across OSC title changes by agents)
       pane_id=$(find_pane "$title" || true)
       state="dead"; backend="-"
       if [[ -n "$pane_id" ]]; then

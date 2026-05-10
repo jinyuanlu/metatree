@@ -498,7 +498,62 @@ echo "$diag_out" | grep -q 'KEYBINDINGS' || fail "diagnose missing KEYBINDINGS s
 echo "$diag_out" | grep -q 'LOG' || fail "diagnose missing LOG section"
 pass "mt diagnose prints VERSIONS / KEYBINDINGS / LOG sections"
 
-section "18. credentials.json is untouched (auth invariant §1.4)"
+section "18. mt new from a pane whose title was OSC-clobbered still splits"
+# Real bug from screenshot: Claude Code emits OSC 2 to set pane_title to its
+# cwd. mt's old detection (regex on pane_title) read mt_pane_count=0 →
+# bare-shell-reuse path → send-keys into Claude's input. Fix uses the
+# @mt-managed user option which can't be touched by escape sequences.
+GC_FIX="$TMP/osc-test-repo"
+git init -q -b main "$GC_FIX"
+(cd "$GC_FIX" && echo a > a && git add a && git -c user.name=t -c user.email=t@t commit -q -m init)
+
+OSC_CONFIG="$TMP/osc-config.toml"
+cat >"$OSC_CONFIG" <<EOF
+repos = ["$GC_FIX"]
+tmux_session = "mt-smoke"
+tmux_window  = "dashboard"
+branch_prefix = "osc"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "cat"
+auto_direnv_allow = "false"
+EOF
+
+# create pane, then simulate OSC overwrite of pane_title
+MT_CONFIG="$OSC_CONFIG" MT_REPO="$GC_FIX" MT_BRANCH="osc-pane-a" \
+  "$MT" new --with claude >/dev/null 2>&1 &
+sleep 0.5; kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+
+osc_pane=$(tmux list-panes -t mt-smoke:dashboard \
+  -F '#{pane_id}|#{@mt-managed}' 2>/dev/null \
+  | awk -F'|' '$2 == "osc-test-repo:osc-pane-a" {print $1; exit}' || true)
+[[ -n "$osc_pane" ]] || fail "could not locate osc-pane-a after creation"
+
+# overwrite pane_title via OSC 2 (simulating Claude's behavior)
+tmux respawn-pane -k -t "$osc_pane" "bash -c 'printf \"\\033]2;hijacked\\007\"; exec sleep 9999'" >/dev/null 2>&1
+sleep 0.3
+
+# pane_title should now be hijacked, but @mt-managed should be preserved
+hijacked_title=$(tmux display-message -p -t "$osc_pane" '#{pane_title}' 2>/dev/null)
+preserved_marker=$(tmux display-message -p -t "$osc_pane" '#{@mt-managed}' 2>/dev/null)
+[[ "$hijacked_title" == "hijacked" ]] \
+  || fail "OSC overwrite test setup broken: pane_title=$hijacked_title"
+[[ "$preserved_marker" == "osc-test-repo:osc-pane-a" ]] \
+  || fail "@mt-managed got clobbered (should be stable): $preserved_marker"
+pass "pane_title hijacked but @mt-managed preserved"
+
+# now run a SECOND mt new — must split (not send-keys), since @mt-managed = 1 pane
+panes_before=$(tmux list-panes -t mt-smoke:dashboard -F '#{pane_id}' | wc -l | tr -d ' ')
+MT_CONFIG="$OSC_CONFIG" MT_REPO="$GC_FIX" MT_BRANCH="osc-pane-b" \
+  "$MT" new --with claude >/dev/null 2>&1 &
+sleep 0.5; kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+panes_after=$(tmux list-panes -t mt-smoke:dashboard -F '#{pane_id}' | wc -l | tr -d ' ')
+
+[[ "$panes_after" -gt "$panes_before" ]] \
+  || fail "mt new did not split — bare-shell-reuse fired despite OSC-clobbered title (panes: $panes_before → $panes_after)"
+pass "mt new split a new pane (panes: $panes_before → $panes_after) instead of falling back to send-keys"
+
+section "19. credentials.json is untouched (auth invariant §1.4)"
 
 section "13. credentials.json is untouched (auth invariant §1.4)"
 # we don't actually have ~/.claude/.credentials.json in CI, but we can verify
