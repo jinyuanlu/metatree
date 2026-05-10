@@ -184,6 +184,19 @@ The full design rationale, domain model, acceptance criteria, and failure modes 
 
 ## Testing
 
+If you have [`just`](https://github.com/casey/just) installed (`brew install just`):
+
+```sh
+just              # list recipes
+just test        # run e2e smoke (the load-bearing test, ~3s)
+just test-units  # bats unit tests (needs: brew install bats-core)
+just test-all    # smoke + units
+just check       # bash -n syntax check
+just install     # local install: mt.sh → ~/.local/bin/mt
+```
+
+Without `just`:
+
 ```sh
 # end-to-end integration test (no dependencies beyond bash + tmux + git)
 bash tests/smoke.sh
