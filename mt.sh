@@ -24,6 +24,10 @@ MT_REPOS=()
 # allow` so the agent's pane doesn't see the "blocked .envrc" warning.
 # Set to "false" if you point mt at freshly-cloned third-party repos.
 MT_AUTO_DIRENV_ALLOW="true"
+# When creating/touching the dashboard, mt sets useful per-pane border
+# format and status-right format on its tmux session/window. Set to "false"
+# if you'd rather keep your own tmux status line untouched.
+MT_AUTO_STATUS_CHROME="true"
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -102,6 +106,7 @@ load_config() {
         claude_cmd)      MT_CLAUDE_CMD="$value";;
         ollama_cmd)      MT_OLLAMA_CMD="$value";;
         auto_direnv_allow) MT_AUTO_DIRENV_ALLOW="$value";;
+        auto_status_chrome) MT_AUTO_STATUS_CHROME="$value";;
       esac
     fi
   done < "$MT_CONFIG"
@@ -143,7 +148,7 @@ ensure_dashboard() {
   if ! tmux list-windows -t "$MT_TMUX_SESSION" -F '#W' 2>/dev/null | grep -qx "$MT_TMUX_WINDOW"; then
     tmux new-window -t "$MT_TMUX_SESSION:" -n "$MT_TMUX_WINDOW"
   fi
-  tmux set-window-option -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" pane-border-status top 2>/dev/null || true
+  _configure_dashboard_chrome
 
   # Auto-install popup bindings if they're missing on this tmux server.
   # Server restarts wipe bindings; this restores them on the next mt
@@ -154,6 +159,34 @@ ensure_dashboard() {
       printf 'mt: installed prefix+g/G/N/R bindings on this tmux server\n' >&2
     fi
   fi
+}
+
+# Configure the dashboard's chrome: pane border format and status line.
+# Scoped to our session/window only (set-window-option / -t session) so we
+# don't clobber the user's other tmux sessions. Skip when the user has
+# disabled it via auto_status_chrome=false.
+_configure_dashboard_chrome() {
+  [[ "${MT_AUTO_STATUS_CHROME:-true}" == "true" ]] || return 0
+  local target="$MT_TMUX_SESSION:$MT_TMUX_WINDOW"
+
+  # Pane border (per-window) — show pane index + mt's marker + running command.
+  # `@mt-managed` is the stable marker; falls back to '-' when missing
+  # (bare shells and externally-split panes). pane_current_command shows
+  # what's running so you can tell claude / ollama / shell apart at a glance.
+  tmux set-window-option -t "$target" pane-border-status top 2>/dev/null || true
+  tmux set-window-option -t "$target" pane-border-format \
+    '#{?pane_active,#[reverse] , }#{pane_index} #{?@mt-managed,#{@mt-managed},-} (#{pane_current_command})#[default]' \
+    2>/dev/null || true
+
+  # Status-right (per-session) — active pane's mt marker, then cwd, then clock.
+  # The cwd is the actual filesystem path (#{pane_current_path}), shortened
+  # to keep the status line readable. Answers "which folder am I in?" at
+  # all times, regardless of what the agent has done to the prompt.
+  tmux set-option -t "$MT_TMUX_SESSION" status-right \
+    '#[fg=cyan]#{?@mt-managed,#{@mt-managed},(no mt pane)}#[default]  ·  #{=50:pane_current_path}  ·  %H:%M' \
+    2>/dev/null || true
+  tmux set-option -t "$MT_TMUX_SESSION" status-right-length 120 2>/dev/null || true
+  tmux set-option -t "$MT_TMUX_SESSION" status-interval 2 2>/dev/null || true
 }
 
 # Find a pane by mt's stable marker, NOT pane_title (which agents like

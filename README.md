@@ -176,6 +176,17 @@ The Ollama backend has no analog: local model servers have no shared credentials
 
 The full design rationale, domain model, acceptance criteria, and failure modes live in [`spec.md`](spec.md). Worth reading if you're forking or want to understand the auth invariant in detail.
 
+## What you see on the dashboard
+
+`mt` configures two pieces of native tmux chrome on its dashboard window so you always know where you are, even when an agent has overwritten the terminal title:
+
+- **Pane border (top of each pane)** — shows `<index> <repo>:<branch> (<command>)`. The `<repo>:<branch>` part is the stable mt marker (a tmux per-pane user option, immune to OSC escape sequences from inside the agent).
+- **Status bar (bottom right)** — shows the active pane's `<repo>:<branch>` marker, the actual filesystem cwd (`#{pane_current_path}`, truncated to 50 chars), and a clock. Refreshes every 2 seconds.
+
+Both are scoped to mt's session/window only — your other tmux sessions are untouched. Disable with `auto_status_chrome = "false"` in `~/.config/mt/config.toml`.
+
+**MCP status**: Claude Code's MCP state isn't exposed to tmux. Any "live" indicator would mean polling `claude mcp list` on a tmux refresh interval, which adds latency and load. If Claude ships a way to read MCP state from a file in the future (`~/.claude/mcp-status.json` or similar), `mt` can pick it up via `#{?mcp_ok,✓,✗}` in the status line — until then, use Claude's own `/doctor` to check.
+
 ## Troubleshooting
 
 `prefix + g` (or any other binding) does nothing? In order:
