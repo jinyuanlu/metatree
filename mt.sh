@@ -20,6 +20,10 @@ MT_CLAUDE_CMD="claude"
 MT_OLLAMA_CMD="ollama run {model}"
 MT_REPOS_DIRS=("$HOME/Code")
 MT_REPOS=()
+# When a new worktree contains an .envrc and direnv is on PATH, run `direnv
+# allow` so the agent's pane doesn't see the "blocked .envrc" warning.
+# Set to "false" if you point mt at freshly-cloned third-party repos.
+MT_AUTO_DIRENV_ALLOW="true"
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -64,6 +68,7 @@ load_config() {
         ollama_model)    MT_OLLAMA_MODEL="$value";;
         claude_cmd)      MT_CLAUDE_CMD="$value";;
         ollama_cmd)      MT_OLLAMA_CMD="$value";;
+        auto_direnv_allow) MT_AUTO_DIRENV_ALLOW="$value";;
       esac
     fi
   done < "$MT_CONFIG"
@@ -178,6 +183,13 @@ cmd_new() {
       || die "path exists: $worktree_path"
   else
     git -C "$repo" worktree add -b "$full_branch" "$worktree_path" || exit $?
+    # Pre-approve direnv so the agent's pane doesn't see "blocked .envrc".
+    # Skipped when: feature disabled, no .envrc, direnv missing, or call fails.
+    if [[ "$MT_AUTO_DIRENV_ALLOW" == "true" ]] \
+       && [[ -f "$worktree_path/.envrc" ]] \
+       && command -v direnv >/dev/null 2>&1; then
+      direnv allow "$worktree_path" >/dev/null 2>&1 || true
+    fi
   fi
 
   local cmd

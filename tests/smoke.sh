@@ -181,7 +181,77 @@ MT_RM_TITLE="acme-api:dirty-branch" "$MT" rm --force >/dev/null 2>&1
   || fail "mt rm --force did not remove dirty worktree"
 pass "mt rm --force removed dirty worktree"
 
-section "10. credentials.json is untouched (auth invariant §1.4)"
+section "10. auto-direnv-allow runs when worktree has .envrc"
+# Use a fixture repo that contains an .envrc, with a stub `direnv` on PATH
+# that records its arguments. Verify mt new invokes `direnv allow <path>`.
+DIRENV_FIXTURE="$TMP/with-envrc"
+git init -q -b main "$DIRENV_FIXTURE"
+echo 'export FROM_ENVRC=1' > "$DIRENV_FIXTURE/.envrc"
+(
+  cd "$DIRENV_FIXTURE"
+  git add .envrc
+  git -c user.name=test -c user.email=t@t commit -q -m "add .envrc"
+)
+
+# stub direnv: prepend a fake to PATH that logs every invocation
+STUB_BIN="$TMP/stub"
+mkdir -p "$STUB_BIN"
+cat > "$STUB_BIN/direnv" <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >> "${MT_DIRENV_LOG:-/tmp/mt-direnv.log}"
+STUB
+chmod +x "$STUB_BIN/direnv"
+export MT_DIRENV_LOG="$TMP/direnv.log"
+: > "$MT_DIRENV_LOG"
+
+# point config at the new fixture (overrides the smoke config for this section)
+DIRENV_CONFIG="$TMP/with-envrc-config.toml"
+cat >"$DIRENV_CONFIG" <<EOF
+repos = ["$DIRENV_FIXTURE"]
+tmux_session = "mt-smoke"
+tmux_window  = "dashboard"
+branch_prefix = "smoke"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "cat"
+auto_direnv_allow = "true"
+EOF
+
+PATH="$STUB_BIN:$PATH" MT_CONFIG="$DIRENV_CONFIG" \
+  MT_REPO="$DIRENV_FIXTURE" MT_BRANCH="envrc-test" "$MT" new --with claude >/dev/null 2>&1 &
+MT_PID=$!
+sleep 1
+kill "$MT_PID" 2>/dev/null || true
+wait "$MT_PID" 2>/dev/null || true
+
+# the stub should have logged a `direnv allow <worktree-path>` invocation
+expected_path="$DIRENV_FIXTURE/.worktrees/envrc-test"
+grep -q "^allow $expected_path$" "$MT_DIRENV_LOG" \
+  || fail "direnv allow not invoked. log contents: $(cat "$MT_DIRENV_LOG")"
+pass "direnv allow $expected_path was invoked"
+
+# and again with auto_direnv_allow disabled — should NOT call direnv
+DIRENV_OFF_CONFIG="$TMP/with-envrc-off.toml"
+cp "$DIRENV_CONFIG" "$DIRENV_OFF_CONFIG"
+sed -i.bak 's/auto_direnv_allow = "true"/auto_direnv_allow = "false"/' "$DIRENV_OFF_CONFIG"
+: > "$MT_DIRENV_LOG"
+
+PATH="$STUB_BIN:$PATH" MT_CONFIG="$DIRENV_OFF_CONFIG" \
+  MT_REPO="$DIRENV_FIXTURE" MT_BRANCH="envrc-off" "$MT" new --with claude >/dev/null 2>&1 &
+MT_PID=$!
+sleep 1
+kill "$MT_PID" 2>/dev/null || true
+wait "$MT_PID" 2>/dev/null || true
+
+[[ ! -s "$MT_DIRENV_LOG" ]] \
+  || fail "direnv was called despite auto_direnv_allow=false. log: $(cat "$MT_DIRENV_LOG")"
+pass "direnv NOT invoked when auto_direnv_allow=false"
+
+# restore config for the credentials check below
+export MT_CONFIG="$CONFIG"
+unset MT_DIRENV_LOG
+
+section "11. credentials.json is untouched (auth invariant §1.4)"
 # we don't actually have ~/.claude/.credentials.json in CI, but we can verify
 # that mt.sh contains zero non-comment references to it. Comments mentioning
 # the file (e.g., the header doc) are fine and expected.

@@ -279,6 +279,12 @@ ollama_model = "llama3:8b"
 # {path} is the worktree directory; {model} is ollama_model
 claude_cmd = "claude"
 ollama_cmd = "ollama run {model}"
+
+# When a new worktree contains an .envrc and direnv is on PATH, run
+# `direnv allow` so the agent's pane doesn't see "blocked .envrc" warnings.
+# Set to "false" if you point mt at freshly-cloned third-party repos —
+# auto-allowing an untrusted .envrc is a code-execution risk.
+auto_direnv_allow = "true"
 ```
 
 ### 2.7 Acceptance criteria

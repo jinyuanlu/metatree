@@ -83,6 +83,11 @@ ollama_model    = "llama3:8b"
 # command templates (overridable; defaults just work)
 claude_cmd = "claude"
 ollama_cmd = "ollama run {model}"
+
+# Pre-approve direnv on new worktrees that have an .envrc. Defaults to "true"
+# because the typical mt user creates worktrees of their own repos. Set to
+# "false" if you point mt at freshly-cloned third-party repos.
+auto_direnv_allow = "true"
 ```
 
 ## Tmux is the entire UI
