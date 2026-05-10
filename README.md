@@ -164,6 +164,26 @@ There are several adjacent tools. `mt`'s wedge:
 
 If those aren't your priorities, [`claude-squad`](https://github.com/smtg-ai/claude-squad), [`cmux`](https://github.com/craigsc/cmux), [`ccmanager`](https://github.com/kbwo/ccmanager), [`muxtree`](https://dev.to/b-d055/introducing-muxtree-dead-simple-worktree-tmux-sessions-for-ai-coding-2kf2) are all good neighbors.
 
+## How `claude_cmd` is launched
+
+`mt` runs `claude` (and `ollama`) through your interactive shell so that any alias you've defined for the agent is honored — the typical case is `alias claude='claude --mcp-config ~/.claude/mcp.json'`, and that flag survives every `mt new`. This applies to both the first pane and every subsequent pane.
+
+Concretely:
+
+- **First pane.** `mt` types `cd <worktree> && <claude_cmd>; exit` into the existing dashboard pane shell. The shell expands the alias before running; `; exit` closes the pane when the agent exits.
+- **Subsequent panes.** `mt` runs `tmux split-window` with the agent command wrapped as `$SHELL -ic '<claude_cmd>'`. The wrapping shell reads your rcfile (`.bashrc` / `.zshrc` / `config.fish`), expands the alias, and exits when the agent exits — closing the pane.
+
+We deliberately do **not** prefix the inner command with `exec`: in both bash and zsh, `exec <name>` is a special-builtin form that suppresses alias expansion on its argument, which would silently drop the `--mcp-config` flag from your alias and load the bare `claude` binary.
+
+The wrap is enabled when `$SHELL` is `bash`, `zsh`, or `fish`. For other shells (nushell, PowerShell, dash, …), `mt` passes the command through unchanged — the same behavior as before this guarantee existed — and prints a one-line warning so you know aliases won't expand. Bake the literal command into config to recover:
+
+```toml
+# ~/.config/mt/config.toml
+claude_cmd = "claude --mcp-config $HOME/.claude/mcp.json"
+```
+
+That string is honored verbatim, regardless of shell.
+
 ## Auth invariant (Claude Code)
 
 `mt` is a control-plane CLI: it creates the worktree, launches `claude` in a tmux pane, and exits. After that, `claude` owns its OAuth refresh cycle entirely — the same way `cd <repo> && claude` typed at a shell prompt does.
