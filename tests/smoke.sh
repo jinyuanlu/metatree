@@ -289,14 +289,126 @@ active_title=$(tmux display-message -p -t mt-smoke:dashboard '#{pane_title}')
   || fail "mt switch did not focus $target_title (active title: $active_title)"
 pass "mt switch focused $target_title"
 
-section "12. mt bind installs tmux keybindings"
+section "12. mt bind installs tmux keybindings using absolute mt path"
 "$MT" bind >/dev/null 2>&1
-# verify each binding exists on the running server
+# verify each binding exists on the running server AND uses absolute path
 for key in g G N R; do
   tmux list-keys -T prefix | grep -qE "^bind-key\s+-T prefix\s+$key\b.*display-popup" \
     || fail "binding for prefix+$key not installed"
 done
-pass "prefix+g/G/N/R bound to display-popup mt commands"
+# the binding string must contain the absolute path to mt.sh, not bare "mt"
+binding_g=$(tmux list-keys -T prefix | grep -E "^bind-key\s+-T prefix\s+g\b" || true)
+echo "$binding_g" | grep -qF "$MT" \
+  || fail "prefix+g binding does not use absolute mt path. got: $binding_g"
+pass "prefix+g/G/N/R bound; binding uses absolute path ($MT)"
+
+section "13. auto-direnv-allow skips encrypted .envrc (git-crypt safety)"
+ENCRYPTED_FIXTURE="$TMP/with-encrypted-envrc"
+git init -q -b main "$ENCRYPTED_FIXTURE"
+# Write a fake git-crypt-encrypted .envrc: starts with the magic bytes
+# "\x00GITCRYPT\x00" followed by binary garbage.
+printf '\x00GITCRYPT\x00\x42\x99\x12\xaa\xbb\xccrest is binary garbage' \
+  > "$ENCRYPTED_FIXTURE/.envrc"
+(
+  cd "$ENCRYPTED_FIXTURE"
+  git add .envrc
+  git -c user.name=test -c user.email=t@t commit -q -m "encrypted envrc"
+)
+
+ENC_CONFIG="$TMP/with-encrypted-config.toml"
+cat >"$ENC_CONFIG" <<EOF
+repos = ["$ENCRYPTED_FIXTURE"]
+tmux_session = "mt-smoke"
+tmux_window  = "dashboard"
+branch_prefix = "smoke"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "cat"
+auto_direnv_allow = "true"
+EOF
+
+# stub direnv (reuses the stub from section 10) — log to a fresh file
+export MT_DIRENV_LOG="$TMP/direnv-encrypted.log"
+: > "$MT_DIRENV_LOG"
+
+PATH="$STUB_BIN:$PATH" MT_CONFIG="$ENC_CONFIG" \
+  MT_REPO="$ENCRYPTED_FIXTURE" MT_BRANCH="enc-test" "$MT" new --with claude >/dev/null 2>&1 &
+MT_PID=$!
+sleep 1
+kill "$MT_PID" 2>/dev/null || true
+wait "$MT_PID" 2>/dev/null || true
+
+# direnv must NOT have been called for the encrypted .envrc — otherwise we'd
+# be authorizing direnv to source binary garbage as a shell script.
+[[ ! -s "$MT_DIRENV_LOG" ]] \
+  || fail "direnv was invoked on encrypted .envrc — should be skipped. log: $(cat "$MT_DIRENV_LOG")"
+pass "direnv NOT invoked on git-crypt-encrypted .envrc"
+
+# restore for the credentials check
+unset MT_DIRENV_LOG
+export MT_CONFIG="$CONFIG"
+
+section "14. real git-crypt: mt new decrypts .envrc in the new worktree"
+if ! command -v git-crypt >/dev/null 2>&1; then
+  pass "(skipped — git-crypt not installed)"
+else
+  GC_FIXTURE="$TMP/with-git-crypt"
+  git init -q -b main "$GC_FIXTURE"
+  (
+    cd "$GC_FIXTURE"
+    git-crypt init >/dev/null 2>&1
+    echo '.envrc filter=git-crypt diff=git-crypt' > .gitattributes
+    echo 'export REAL_DECRYPTED=success' > .envrc
+    git add .gitattributes .envrc
+    git -c user.name=t -c user.email=t@t commit -q -m "init"
+  )
+
+  # confirm .envrc is encrypted in the parent repo's object DB.
+  # Bash's $(...) strips null bytes, so use xxd to compare hex strings.
+  obj_dump="$TMP/obj-envrc.bin"
+  git -C "$GC_FIXTURE" show HEAD:.envrc > "$obj_dump"
+  obj_hex=$(head -c 10 "$obj_dump" | xxd -p | head -1)
+  expected_hex="00474954435259505400"
+  [[ "$obj_hex" == "$expected_hex"* ]] \
+    || fail "test fixture: .envrc not git-crypt-encrypted (first 10 bytes: $obj_hex)"
+
+  GC_CONFIG="$TMP/git-crypt-config.toml"
+  cat >"$GC_CONFIG" <<EOF
+repos = ["$GC_FIXTURE"]
+tmux_session = "mt-smoke"
+tmux_window  = "dashboard"
+branch_prefix = "smoke"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "cat"
+auto_direnv_allow = "true"
+EOF
+
+  MT_CONFIG="$GC_CONFIG" MT_REPO="$GC_FIXTURE" MT_BRANCH="gc-decrypt" \
+    "$MT" new --with claude >/dev/null 2>&1 &
+  MT_PID=$!
+  sleep 1
+  kill "$MT_PID" 2>/dev/null || true
+  wait "$MT_PID" 2>/dev/null || true
+
+  WT="$GC_FIXTURE/.worktrees/gc-decrypt"
+  [[ -d "$WT" ]] || fail "git-crypt worktree was not created"
+  pass "worktree created at $WT"
+
+  [[ -f "$WT/.envrc" ]] || fail ".envrc missing in worktree"
+  # Compare first 10 bytes against git-crypt magic to test encryption status
+  wt_hex=$(head -c 10 "$WT/.envrc" | xxd -p | head -1)
+  if [[ "$wt_hex" == "$expected_hex"* ]]; then
+    fail ".envrc in worktree is still encrypted (smudge filter did not run)"
+  fi
+  pass ".envrc in worktree is decrypted (first bytes: $wt_hex)"
+
+  grep -qF 'REAL_DECRYPTED=success' "$WT/.envrc" \
+    || fail "decrypted content does not match original"
+  pass ".envrc content matches original ($(cat "$WT/.envrc"))"
+fi
+
+section "15. credentials.json is untouched (auth invariant §1.4)"
 
 section "13. credentials.json is untouched (auth invariant §1.4)"
 # we don't actually have ~/.claude/.credentials.json in CI, but we can verify

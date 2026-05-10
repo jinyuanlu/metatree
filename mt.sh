@@ -37,6 +37,28 @@ slugify() {
 
 expand_tilde() { printf '%s' "${1/#\~/$HOME}"; }
 
+# git-crypt encrypted files start with "\x00GITCRYPT\x00" (10 bytes).
+# Detecting this lets us skip auto-direnv-allow on still-encrypted files,
+# which would otherwise authorize direnv to source binary garbage.
+is_git_crypted() {
+  [[ -f "$1" ]] || return 1
+  local sig
+  sig=$(head -c 10 "$1" 2>/dev/null | xxd -p 2>/dev/null)
+  [[ "$sig" == "00474954435259505400"* ]]
+}
+
+# Resolve the absolute path of this script (for tmux bindings to call mt
+# without relying on PATH). Portable across macOS (no readlink -f).
+mt_self_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir; dir=$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)
+    src=$(readlink "$src")
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  printf '%s/%s\n' "$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)" "$(basename "$src")"
+}
+
 # minimal TOML reader: handles `key = "string"` and `key = ["a", "b"]`
 load_config() {
   [[ -f "$MT_CONFIG" ]] || return 0
@@ -136,22 +158,28 @@ cmd_bind() {
   tmux has-session 2>/dev/null \
     || die "tmux server not running; start with: tmux new -d -s $MT_TMUX_SESSION"
 
+  # Use absolute path to mt so the binding works regardless of tmux's
+  # inherited PATH. The most common silent failure is `~/.local/bin` not
+  # being on PATH when tmux was started; bindings using bare `mt` then
+  # do nothing when invoked.
+  local mt; mt=$(mt_self_path)
+
   # Bindings reachable from inside an agent (Claude/Ollama) — the prefix
   # is intercepted by tmux before it reaches the pane, so the agent never
-  # sees the keystrokes. display-popup -E runs `mt` in an overlay window
+  # sees the keystrokes. display-popup -E runs mt in an overlay window
   # and exits when the command returns; the agent stays focused.
-  tmux bind-key g display-popup -w 80% -h 60% -E "mt switch -z"
-  tmux bind-key G display-popup -w 80% -h 60% -E "mt switch"
-  tmux bind-key N display-popup -w 80% -h 60% -E "mt new"
-  tmux bind-key R display-popup -w 80% -h 60% -E "mt rm"
+  tmux bind-key g display-popup -w 80% -h 60% -E "$mt switch -z"
+  tmux bind-key G display-popup -w 80% -h 60% -E "$mt switch"
+  tmux bind-key N display-popup -w 80% -h 60% -E "$mt new"
+  tmux bind-key R display-popup -w 80% -h 60% -E "$mt rm"
 
   cat <<EOF
-mt keybindings set on the running tmux server:
+mt keybindings set on the running tmux server (absolute-path form):
 
-  prefix + g   →  mt switch (zoom selected pane)   ← high-frequency
-  prefix + G   →  mt switch (no zoom)
-  prefix + N   →  mt new
-  prefix + R   →  mt rm
+  prefix + g   →  $mt switch -z      ← high-frequency
+  prefix + G   →  $mt switch
+  prefix + N   →  $mt new
+  prefix + R   →  $mt rm
 
 Reach them from inside Claude or Ollama — tmux intercepts the prefix
 before the agent sees the keystrokes. The popup overlays the screen,
@@ -160,16 +188,15 @@ runs fzf, and disappears the moment you press enter.
 These bindings live on the running tmux server only. To persist across
 restarts, add to ~/.tmux.conf:
 
-  bind-key g display-popup -w 80% -h 60% -E "mt switch -z"
-  bind-key G display-popup -w 80% -h 60% -E "mt switch"
-  bind-key N display-popup -w 80% -h 60% -E "mt new"
-  bind-key R display-popup -w 80% -h 60% -E "mt rm"
+  bind-key g display-popup -w 80% -h 60% -E "$mt switch -z"
+  bind-key G display-popup -w 80% -h 60% -E "$mt switch"
+  bind-key N display-popup -w 80% -h 60% -E "$mt new"
+  bind-key R display-popup -w 80% -h 60% -E "$mt rm"
 
 Then run:  tmux source ~/.tmux.conf
 
-Requires tmux 3.2+ (display-popup). 'mt' must be on PATH from tmux's
-environment (test:  tmux display-message -p '#{LOCATION_OF_MT}' or
-just press prefix+g and see if anything happens).
+Requires tmux 3.2+ (display-popup). Verify the binding is set:
+  tmux list-keys | grep -E '^bind-key.*\\bg\\b.*display-popup'
 EOF
 }
 
@@ -254,11 +281,36 @@ cmd_new() {
     git -C "$repo" worktree list --porcelain | grep -q "^worktree $worktree_path$" \
       || die "path exists: $worktree_path"
   else
-    git -C "$repo" worktree add -b "$full_branch" "$worktree_path" || exit $?
+    # If the parent repo uses git-crypt, plain `git worktree add` fails: the
+    # smudge filter runs in the new worktree's context where GIT_DIR points
+    # at <parent>/.git/worktrees/<name>, but git-crypt looks for its key at
+    # $GIT_DIR/git-crypt/keys/default — which doesn't exist (the key lives
+    # at the parent's <parent>/.git/git-crypt/keys/default). So we use the
+    # --no-checkout pattern, copy the key into the worktree's per-worktree
+    # git dir, then check out files (smudge now finds the key, decrypts).
+    if [[ -f "$repo/.git/git-crypt/keys/default" ]] \
+       && command -v git-crypt >/dev/null 2>&1; then
+      git -C "$repo" worktree add --no-checkout -b "$full_branch" "$worktree_path" \
+        || exit $?
+      local wt_name wt_git_dir parent_key
+      wt_name=$(basename "$worktree_path")
+      wt_git_dir="$repo/.git/worktrees/$wt_name"
+      parent_key="$repo/.git/git-crypt/keys/default"
+      if [[ -d "$wt_git_dir" && -f "$parent_key" ]]; then
+        mkdir -p "$wt_git_dir/git-crypt/keys"
+        cp "$parent_key" "$wt_git_dir/git-crypt/keys/default"
+      fi
+      git -C "$worktree_path" checkout HEAD -- . >/dev/null 2>&1 || true
+    else
+      git -C "$repo" worktree add -b "$full_branch" "$worktree_path" || exit $?
+    fi
+
     # Pre-approve direnv so the agent's pane doesn't see "blocked .envrc".
-    # Skipped when: feature disabled, no .envrc, direnv missing, or call fails.
+    # Skipped when: feature disabled, no .envrc, .envrc still encrypted
+    # (git-crypt unlock failed or absent), direnv missing, or call fails.
     if [[ "$MT_AUTO_DIRENV_ALLOW" == "true" ]] \
        && [[ -f "$worktree_path/.envrc" ]] \
+       && ! is_git_crypted "$worktree_path/.envrc" \
        && command -v direnv >/dev/null 2>&1; then
       direnv allow "$worktree_path" >/dev/null 2>&1 || true
     fi
