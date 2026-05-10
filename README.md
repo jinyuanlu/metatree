@@ -22,7 +22,7 @@ The pain is the next morning, when you can't remember which of your 11 tmux wind
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/<user>/metatree/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
 ```
 
 Installs `mt` to `~/.local/bin/`. Make sure that directory is on your `PATH`.

@@ -2,7 +2,7 @@
 # install.sh — fetch mt.sh and install it to ~/.local/bin/mt
 #
 # usage:
-#   curl -fsSL https://raw.githubusercontent.com/<user>/metatree/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
 #
 # what this does:
 #   1. downloads mt.sh from the metatree repo to ~/.local/bin/mt
@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-REPO_URL="${MT_REPO_URL:-https://raw.githubusercontent.com/<user>/metatree/main}"
+REPO_URL="${MT_REPO_URL:-https://raw.githubusercontent.com/jinyuanlu/metatree/master}"
 INSTALL_DIR="${MT_INSTALL_DIR:-$HOME/.local/bin}"
 DEST="$INSTALL_DIR/mt"
 

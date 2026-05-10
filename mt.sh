@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mt — tmux-native control plane for Claude Code and Ollama across worktrees
-# https://github.com/<user>/metatree
+# https://github.com/jinyuanlu/metatree
 #
 # spec: see spec.md (auth invariant §1.4 — mt does not touch ~/.claude/.credentials.json)
 
@@ -286,7 +286,7 @@ usage:
   mt --help
 
 config: ~/.config/mt/config.toml — empty file is valid (all fields default)
-docs:   https://github.com/<user>/metatree
+docs:   https://github.com/jinyuanlu/metatree
 EOF
 }
 
