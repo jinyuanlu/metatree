@@ -1,6 +1,6 @@
 # `mt` — one tmux window, every repo, Claude or Ollama
 
-A control-plane CLI that spawns Claude Code or Ollama sessions in fresh git worktrees, presented as a single tiled tmux dashboard so multiple repos are visible and operable on one page. About 250 lines of bash. No daemon, no TUI, no install dance.
+A control-plane CLI that spawns Claude Code or Ollama sessions in fresh git worktrees, presented as a single tiled tmux dashboard so multiple repos are visible and operable on one page. Single static Go binary, no daemon, no TUI, no install dance.
 
 ```
 ┌─────────────────────┬───────────────────────┐
@@ -25,9 +25,15 @@ The pain is the next morning, when you can't remember which of your 11 tmux wind
 curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
 ```
 
-Installs `mt` to `~/.local/bin/`. Make sure that directory is on your `PATH`.
+Installs the Go binary to `~/.local/bin/mt`. The installer is short, audit-friendly bash that fetches the right prebuilt binary for your OS+arch from GitHub Releases and verifies its checksum.
 
-Requires: `bash`, `tmux` 3.x, `git` ≥ 2.5, `fzf`. Already on every developer Mac. Ollama and Claude Code are optional — install whichever backend you use.
+Power users can build from source instead:
+
+```sh
+go install github.com/jinyuanlu/metatree/cmd/mt@latest
+```
+
+Requires: `tmux` 3.2+ (for `display-popup`), `git` ≥ 2.5, `fzf`. Already on every developer Mac. Ollama and Claude Code are optional — install whichever backend you use.
 
 ## Usage
 
@@ -123,7 +129,7 @@ You're typing into Claude in `acme-api:fix-cookie`. You want to glance at `bytem
 
 Claude in the original pane is untouched — it never saw your keystrokes. To go back: `prefix + g` again, type `acme`, enter.
 
-This is the affordance Conductor users ask for. It's `prefix + g` on a tmux popup with fzf — about 10 lines of bash in `mt.sh`, no daemon, no Electron, works in Terminal.app.
+This is the affordance Conductor users ask for. It's `prefix + g` on a tmux popup with `fzf` — no daemon, no Electron, works in Terminal.app.
 
 ### Make the bindings permanent
 
@@ -154,7 +160,7 @@ There are several adjacent tools. `mt`'s wedge:
 
 - **`mt` is one tmux window with tiled panes**, not one window per session. The dashboard is the unit of persistence — every repo is visible at once, no `prefix + w` listings to scroll. Most alternatives use one tmux window per agent.
 - **Dual backend (Claude Code + Ollama) with the same UX.** Most tools are Claude-only or Codex-only.
-- **About 250 lines of bash.** No Go binary, no TUI framework, no terminal-emulator requirements. Source it from your rc, audit it before installing, modify it without a build step.
+- **Single static Go binary.** No TUI framework, no terminal-emulator requirements, no runtime to install. The binary is small enough to vendor; the source is small enough to read in one sitting (see [`spec-go.md`](spec-go.md) for the architecture).
 
 If those aren't your priorities, [`claude-squad`](https://github.com/smtg-ai/claude-squad), [`cmux`](https://github.com/craigsc/cmux), [`ccmanager`](https://github.com/kbwo/ccmanager), [`muxtree`](https://dev.to/b-d055/introducing-muxtree-dead-simple-worktree-tmux-sessions-for-ai-coding-2kf2) are all good neighbors.
 
@@ -179,7 +185,7 @@ Two documents:
 - **[`spec.md`](spec.md)** — the **product** spec. Commands, behaviors, acceptance criteria, the auth invariant (§1.4), the dashboard topology (§2.5), the failure-modes table (§2.8). This is the source of truth for what `mt` does.
 - **[`spec-go.md`](spec-go.md)** — the **Go implementation** spec. Package layout, error handling, testing strategy, distribution, anti-patterns. Reading this before contributing code is faster than reading the code.
 
-The current `mt.sh` is a bash prototype that grew past the language's sweet spot. The Go port is the v1.0 implementation. Both specs stay aligned through the migration; if they diverge, the product spec wins.
+The current `mt.sh` is the bash prototype, kept in the repo for reference and frozen at commit `6889905`. The Go port is the active implementation as of v1.0. `mt.sh` is removed in v2.0. Both specs stay aligned; if they diverge, the product spec wins.
 
 ## What you see on the dashboard
 
@@ -221,30 +227,32 @@ If you see an `INVOKE` line with `cmd=switch` and an `EXIT` line with non-zero `
 
 ## Testing
 
-If you have [`just`](https://github.com/casey/just) installed (`brew install just`):
+The Go port ships with three test tiers. With [`just`](https://github.com/casey/just) installed (`brew install just`):
 
 ```sh
 just              # list recipes
-just test        # run e2e smoke (the load-bearing test, ~3s)
-just test-units  # bats unit tests (needs: brew install bats-core)
-just test-all    # smoke + units
-just check       # bash -n syntax check
-just install     # local install: mt.sh → ~/.local/bin/mt
+just build        # go build -o ./bin/mt-go ./cmd/mt
+just test-go      # Go unit + integration tests with -race
+just lint         # gofmt + go vet
+just test         # bash smoke (still tests the frozen mt.sh — kept for reference)
 ```
 
 Without `just`:
 
 ```sh
-# end-to-end integration test (no dependencies beyond bash + tmux + git)
-bash tests/smoke.sh
+# Go unit + integration (the load-bearing tier)
+go test -race ./...
 
-# pure-function unit tests (requires: brew install bats-core)
-bats tests/mt.bats
+# Build the binary
+go build -o ./bin/mt-go ./cmd/mt
+
+# Bash smoke (frozen mt.sh — still passes; kept until v2.0)
+bash tests/smoke.sh
 ```
 
-`tests/smoke.sh` is the load-bearing test. It builds a temporary git fixture under `/tmp/mt-smoke.$$`, runs a headless tmux server in an isolated socket directory, and exercises the full `mt new → mt ls → mt rm` cycle non-interactively (via `MT_REPO`, `MT_BRANCH`, `MT_RM_TITLE` env-var hooks). Asserts: worktree creation, branch creation, pane creation with correct title, idempotency, dirty-tree refusal, `--force` bypass, and the auth invariant (no non-comment references to `credentials.json` or `ANTHROPIC_*` in `mt.sh`).
+The Go test suite covers four layers: `internal/config` (TOML schema, defaults), `internal/mtlog` (invocation log), `internal/tmuxio` (tmux wrappers, real fixtures), `internal/gitio` (worktree discovery, real git fixtures), plus `tests/integration_test.go` driving the built binary end-to-end. CI runs `gofmt -l`, `go vet`, `go test -race ./...`, the smoke against the Go binary, and an auth-invariant grep on every push and PR. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-`tests/mt.bats` covers the pure functions (`slugify`, `pane_title`, `expand_tilde`, `load_config`) — fast, dependency-free regression catches.
+`tests/smoke.sh` (19 sections) is the executable specification — preserved verbatim from the bash era as the cross-implementation regression suite.
 
 ## License
 
