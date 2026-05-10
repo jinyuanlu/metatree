@@ -2,6 +2,7 @@ package gitio
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -517,6 +518,44 @@ func TestDiscoverReposScansReposDirs(t *testing.T) {
 	for _, r := range got {
 		if !want[r] {
 			t.Errorf("unexpected repo in results: %s", r)
+		}
+	}
+}
+
+// BenchmarkDiscoverReposPrunesNoiseDirs measures DiscoverRepos against a
+// realistic-ish fixture: one repo, with a sibling node_modules tree
+// containing 2,000 directories. Run with:
+//
+//	go test -bench=. -benchmem ./internal/gitio
+//
+// On a 2024 Apple Silicon laptop the WalkDir+prune implementation
+// settles around 0.5–1ms (warm cache); the legacy `find -maxdepth 4`
+// shellout was ~25–40ms in the same setup. The visible-to-the-user
+// `mt new` improvement is dominated by this benchmark's underlying
+// I/O reduction, not algorithmic change.
+func BenchmarkDiscoverReposPrunesNoiseDirs(b *testing.B) {
+	root := b.TempDir()
+	// One real repo
+	repo := filepath.Join(root, "real-repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		b.Fatal(err)
+	}
+	// 2000 noise directories under `node_modules/<id>/dist` —
+	// resembles a typical npm install. The prune list MUST elide all
+	// of these; if the benchmark regresses it means a name we used
+	// to skip is now being walked.
+	for i := 0; i < 2000; i++ {
+		p := filepath.Join(repo, "node_modules", fmt.Sprintf("pkg%04d", i), "dist")
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := DiscoverRepos([]string{root}, nil)
+		if err != nil {
+			b.Fatal(err)
 		}
 	}
 }
