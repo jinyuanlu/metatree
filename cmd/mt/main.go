@@ -40,6 +40,35 @@ func main() {
 		}
 	}
 
+	subcmd := "show"
+	args := []string{}
+	if len(os.Args) > 1 {
+		subcmd = os.Args[1]
+		args = os.Args[2:]
+	}
+
+	// First-run / migration hook. We run this BEFORE config.Load() so:
+	//   - a brand-new machine gets a config seeded from probe or prompt;
+	//   - an upgrade from the legacy ~/.config/mt/ layout migrates once;
+	//   - and config.Load() always sees a file (or returns Default()).
+	//
+	// Skip for subcommands that must work without a config: setup
+	// (it's literally how you create one), upgrade (just downloads a
+	// binary), and the meta read-only inspection (--version, --help).
+	if needsConfigBootstrap(subcmd) {
+		if err := command.EnsureConfig(os.Stdin, os.Stdout, os.Stderr); err != nil {
+			if errors.Is(err, command.ErrNoConfig) {
+				fmt.Fprintln(os.Stderr,
+					"mt: no config at ~/.metatree/config.toml and no common code folder under $HOME.")
+				fmt.Fprintln(os.Stderr,
+					"    run `mt setup` from a terminal to configure (one prompt).")
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "mt:", err)
+			os.Exit(1)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mt:", err)
@@ -47,13 +76,6 @@ func main() {
 	}
 
 	env := command.New(cfg)
-
-	subcmd := "show"
-	args := []string{}
-	if len(os.Args) > 1 {
-		subcmd = os.Args[1]
-		args = os.Args[2:]
-	}
 
 	mtlog.Write(fmt.Sprintf(
 		"INVOKE cmd=%s args=%s tmux=%s in_tmux=%s cwd=%s",
@@ -81,6 +103,10 @@ func dispatch(env *command.Env, subcmd string, args []string) int {
 		err = command.RunPrune(env, args)
 	case "bind":
 		err = command.RunBind(env, args)
+	case "setup":
+		err = command.RunSetup(env, args)
+	case "upgrade":
+		err = command.RunUpgrade(env, args)
 	case "diagnose", "debug":
 		err = command.RunDiagnose(env, args)
 	case "show":
@@ -118,3 +144,16 @@ func tmuxIndicator(inside bool) string {
 }
 
 func getenvOrEmpty(k string) string { return os.Getenv(k) }
+
+// needsConfigBootstrap reports whether the given subcommand should
+// trigger first-run setup / legacy migration. setup and upgrade are
+// excluded so they remain functional even when there's no config (and
+// `mt setup` is literally how the user creates one). --version / -v /
+// version / --help / -h short-circuit before reaching this hook.
+func needsConfigBootstrap(subcmd string) bool {
+	switch subcmd {
+	case "setup", "upgrade", "-h", "--help":
+		return false
+	}
+	return true
+}

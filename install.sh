@@ -56,6 +56,7 @@ chmod +x "$INSTALL_DIR/mt"
 identity="$("$INSTALL_DIR/mt" --version 2>/dev/null || echo "$INSTALL_DIR/mt (version unknown)")"
 echo "installed: $identity"
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*) echo "PATH ok — try: mt --help" ;;
+  *":$INSTALL_DIR:"*) echo "PATH ok — try: mt setup   (or just \`mt new\` — first run sets itself up)" ;;
   *) echo "add to your shell rc:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
+echo "upgrade later with:  mt upgrade"

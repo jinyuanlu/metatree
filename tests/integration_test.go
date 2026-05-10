@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -556,4 +557,168 @@ func mustSleep(t *testing.T, ms int) {
 	t.Helper()
 	cmd := exec.Command("sleep", fmt.Sprintf("0.%03d", ms))
 	_ = cmd.Run()
+}
+
+// runMtBare runs the mt binary with a clean env (no fixture MT_CONFIG)
+// so we exercise the EnsureConfig path. HOME is overridden to isolate
+// the test from the developer's real ~/.metatree.
+func runMtBare(t *testing.T, fakeHome string, args ...string) (string, string, int) {
+	t.Helper()
+	if testMtBin == "" {
+		t.Fatal("testMtBin unset; TestMain didn't build the mt binary")
+	}
+	cmd := exec.Command(testMtBin, args...)
+	// Strip MT_CONFIG and TMUX from inherited env, set HOME, give an
+	// isolated TMUX_TMPDIR so subcommands that touch tmux don't poison
+	// the developer's session.
+	env := os.Environ()
+	env = withEnv(env, "HOME", fakeHome)
+	env = withEnv(env, "MT_CONFIG", "") // unset — will be removed below
+	env = withEnv(env, "TMUX", "")
+	tmuxSock := filepath.Join(fakeHome, "tmux-sock")
+	if err := os.MkdirAll(tmuxSock, 0o755); err != nil {
+		t.Fatalf("mkdir tmux sock: %v", err)
+	}
+	env = withEnv(env, "TMUX_TMPDIR", tmuxSock)
+	// Strip empty MT_CONFIG entirely (Setenv("MT_CONFIG", "") doesn't
+	// equal "unset" in Go on darwin/linux):
+	clean := make([]string, 0, len(env))
+	for _, kv := range env {
+		if kv == "MT_CONFIG=" {
+			continue
+		}
+		clean = append(clean, kv)
+	}
+	cmd.Env = clean
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	rc := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			rc = ee.ExitCode()
+		} else {
+			t.Fatalf("mt run: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		killCmd := exec.Command("tmux", "kill-server")
+		killCmd.Env = append(os.Environ(), "TMUX_TMPDIR="+tmuxSock, "TMUX=")
+		_ = killCmd.Run()
+	})
+	return stdout.String(), stderr.String(), rc
+}
+
+// TestFirstRunAutoSeedsFromProbe — the zero-prompt happy path. Create
+// $HOME/Developer; running any non-meta subcommand should write
+// ~/.metatree/config.toml with that path in repos_dirs.
+func TestFirstRunAutoSeedsFromProbe(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "Developer"), 0o755); err != nil {
+		t.Fatalf("mkdir Developer: %v", err)
+	}
+
+	_, _, _ = runMtBare(t, home, "diagnose")
+
+	cfgPath := filepath.Join(home, ".metatree", "config.toml")
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("expected %s to exist: %v", cfgPath, err)
+	}
+	if !strings.Contains(string(b), filepath.Join(home, "Developer")) {
+		t.Errorf("config does not include $HOME/Developer in repos_dirs:\n%s", b)
+	}
+}
+
+// TestFirstRunMigratesLegacyConfig — when ~/.config/mt/config.toml
+// exists but ~/.metatree/config.toml doesn't, the legacy file is
+// auto-copied with a stderr notice.
+func TestFirstRunMigratesLegacyConfig(t *testing.T) {
+	home := t.TempDir()
+	legacy := filepath.Join(home, ".config", "mt", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatalf("mkdir legacy: %v", err)
+	}
+	legacyContent := "repos_dirs = [\"~/legacy-marker\"]\n"
+	if err := os.WriteFile(legacy, []byte(legacyContent), 0o600); err != nil {
+		t.Fatalf("write legacy: %v", err)
+	}
+
+	_, stderr, _ := runMtBare(t, home, "diagnose")
+
+	canonical := filepath.Join(home, ".metatree", "config.toml")
+	b, err := os.ReadFile(canonical)
+	if err != nil {
+		t.Fatalf("expected %s after migration: %v", canonical, err)
+	}
+	if !strings.Contains(string(b), "legacy-marker") {
+		t.Errorf("migrated config missing legacy content:\n%s", b)
+	}
+	if !strings.Contains(stderr, "migrated config") {
+		t.Errorf("expected migration notice on stderr, got:\n%s", stderr)
+	}
+
+	// Second invocation: no migration notice (idempotent).
+	_, stderr2, _ := runMtBare(t, home, "diagnose")
+	if strings.Contains(stderr2, "migrated config") {
+		t.Errorf("second run should be a no-op; got migration notice:\n%s", stderr2)
+	}
+}
+
+// TestSetupReposDirsFlagWritesConfig — non-interactive setup writes
+// the requested repos_dirs and exits 0 without prompting.
+func TestSetupReposDirsFlagWritesConfig(t *testing.T) {
+	home := t.TempDir()
+	_, _, rc := runMtBare(t, home, "setup", "--repos-dirs", "~/work,~/oss")
+	if rc != 0 {
+		t.Fatalf("setup --repos-dirs rc=%d", rc)
+	}
+	cfgPath := filepath.Join(home, ".metatree", "config.toml")
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	for _, want := range []string{"~/work", "~/oss"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("config missing %q:\n%s", want, b)
+		}
+	}
+}
+
+// TestSetupClaudeCmdStoresLiteral — the structural fix for the
+// alias-expansion bug. When the user sets claude_cmd via flag, the
+// literal string lands in config and is later run verbatim, bypassing
+// every shell-alias-doesn't-expand failure mode.
+func TestSetupClaudeCmdStoresLiteral(t *testing.T) {
+	home := t.TempDir()
+	literal := "claude --mcp-config ~/.claude/mcp.json"
+	_, _, rc := runMtBare(t, home, "setup", "--claude-cmd", literal)
+	if rc != 0 {
+		t.Fatalf("setup --claude-cmd rc=%d", rc)
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".metatree", "config.toml"))
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !strings.Contains(string(b), "mcp-config") {
+		t.Errorf("claude_cmd not stored literally:\n%s", b)
+	}
+}
+
+// TestSetupPrint — --print emits the resolved config to stdout
+// without writing anything to disk.
+func TestSetupPrint(t *testing.T) {
+	home := t.TempDir()
+	stdout, _, rc := runMtBare(t, home, "setup", "--print")
+	if rc != 0 {
+		t.Fatalf("setup --print rc=%d", rc)
+	}
+	if !strings.Contains(stdout, "tmux_session") {
+		t.Errorf("--print output missing tmux_session:\n%s", stdout)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".metatree", "config.toml")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("--print should not write config; found one anyway")
+	}
 }

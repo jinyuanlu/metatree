@@ -34,17 +34,12 @@ func TestDefault(t *testing.T) {
 		t.Fatal("Default() returned nil")
 	}
 
-	// Spot-check every field is populated. Strings must be non-empty;
-	// bools have an explicit expected value (zero-value matches the
-	// spec, so a positive assertion catches drift).
-	//
-	// Note: ReposDirs is intentionally NOT asserted non-empty here.
-	// Default() probes ~/Code, ~/Developer, ~/dev, etc. and returns
-	// the subset that exists. On a CI runner with a clean home
-	// directory, the slice is empty — and that's correct: the user
-	// gets a clear "configure repos_dirs" error instead of a
-	// silently-broken `~/Code` placeholder. See
-	// TestDefaultReposDirsProbesCommonDirs for the discovery contract.
+	// ReposDirs is empty by design — Default() never injects probed
+	// values silently; the bracketed default for `mt setup` comes from
+	// DiscoverReposDirs(). See TestDiscoverReposDirsProbesCommonDirs.
+	if len(cfg.ReposDirs) != 0 {
+		t.Errorf("ReposDirs = %v, want empty", cfg.ReposDirs)
+	}
 	if cfg.TmuxSession != "mt" {
 		t.Errorf("TmuxSession = %q, want %q", cfg.TmuxSession, "mt")
 	}
@@ -81,57 +76,106 @@ func TestDefaultIsFresh(t *testing.T) {
 	// Defensive: mutating one Default() must not leak into the next.
 	a := Default()
 	a.TmuxSession = "scribbled"
-	beforeLen := len(a.ReposDirs)
 	a.ReposDirs = append(a.ReposDirs, "/tmp/x")
 
 	b := Default()
 	if b.TmuxSession != "mt" {
 		t.Errorf("Default() returned shared state: TmuxSession = %q", b.TmuxSession)
 	}
-	if len(b.ReposDirs) != beforeLen {
-		t.Errorf("Default() returned shared ReposDirs slice: got len %d, want %d",
-			len(b.ReposDirs), beforeLen)
+	if len(b.ReposDirs) != 0 {
+		t.Errorf("Default() returned shared ReposDirs slice: %v", b.ReposDirs)
 	}
 }
 
-// TestDefaultReposDirsProbesCommonDirs verifies the discovery logic:
-// override HOME to a tempdir, create a subset of the candidate dirs,
-// and check that Default() returns exactly those that exist (in the
-// expected priority order).
-func TestDefaultReposDirsProbesCommonDirs(t *testing.T) {
+// TestDiscoverReposDirsProbesCommonDirs verifies the discovery helper
+// (used by `mt setup` as its bracketed default — never injected by
+// Default at runtime). Override HOME to a tempdir, create a subset of
+// the candidate dirs out of priority order, and confirm the result
+// preserves the candidate list order, not filesystem order.
+func TestDiscoverReposDirsProbesCommonDirs(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	// Create a representative subset out of priority order to confirm
-	// the result preserves candidate-list order, not filesystem order.
 	for _, name := range []string{"dev", "Developer", "src"} {
 		if err := os.MkdirAll(filepath.Join(tmp, name), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", name, err)
 		}
 	}
 
-	cfg := Default()
+	got := DiscoverReposDirs()
 	want := []string{
 		filepath.Join(tmp, "Developer"),
 		filepath.Join(tmp, "dev"),
 		filepath.Join(tmp, "src"),
 	}
-	if !reflect.DeepEqual(cfg.ReposDirs, want) {
-		t.Errorf("ReposDirs = %v, want %v", cfg.ReposDirs, want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DiscoverReposDirs() = %v, want %v", got, want)
 	}
 }
 
-// TestDefaultReposDirsEmptyWhenNoneExist confirms the slice is empty
-// (not nil-vs-empty-confused, not a phantom `~/Code` entry) when none
-// of the candidate dirs exist. The downstream "no repos found" error
-// then asks the user to configure repos_dirs explicitly.
-func TestDefaultReposDirsEmptyWhenNoneExist(t *testing.T) {
+// TestDiscoverReposDirsEmptyWhenNoneExist confirms the slice is empty
+// (not a phantom `~/Code` entry) when none of the candidate dirs exist.
+func TestDiscoverReposDirsEmptyWhenNoneExist(t *testing.T) {
 	tmp := t.TempDir() // has nothing under it
 	t.Setenv("HOME", tmp)
 
-	cfg := Default()
-	if len(cfg.ReposDirs) != 0 {
-		t.Errorf("expected empty ReposDirs in HOME=%s, got %v", tmp, cfg.ReposDirs)
+	if got := DiscoverReposDirs(); len(got) != 0 {
+		t.Errorf("expected empty discovery in HOME=%s, got %v", tmp, got)
+	}
+}
+
+// TestSaveLoadRoundTrip verifies that a Config written by Save() reloads
+// to a deep-equal value. Catches encoder/decoder drift, missing struct
+// tags, and any future field that needs round-trip fidelity. flexBool's
+// custom unmarshal makes this non-trivial — bools survive as bools.
+func TestSaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	withConfigEnv(t, path)
+
+	want := Default()
+	want.ReposDirs = []string{"~/work", "~/oss"}
+	want.ClaudeCmd = "claude --mcp-config ~/.claude/mcp.json"
+	want.Path = path
+
+	if err := Save(want, path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round-trip mismatch:\n  got  = %+v\n  want = %+v", got, want)
+	}
+}
+
+// TestSaveCreatesParentDirs confirms Save mkdirs intermediate
+// directories (~/.metatree on a fresh machine doesn't exist).
+func TestSaveCreatesParentDirs(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "a", "b", "c", "config.toml")
+	if err := Save(Default(), nested); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := os.Stat(nested); err != nil {
+		t.Errorf("Save did not create %s: %v", nested, err)
+	}
+}
+
+// TestPathDefaultsToMetatree pins the canonical location. If you find
+// yourself reaching for this test to "just point it elsewhere," stop —
+// the choice was deliberate so config survives `mt upgrade`. See the
+// comment on Path() for rationale.
+func TestPathDefaultsToMetatree(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("MT_CONFIG", "")
+
+	got := Path()
+	want := filepath.Join(tmp, ".metatree", "config.toml")
+	if got != want {
+		t.Errorf("Path() = %q, want %q", got, want)
 	}
 }
 
@@ -346,7 +390,7 @@ func TestPathDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UserHomeDir: %v", err)
 	}
-	want := filepath.Join(home, ".config", "mt", "config.toml")
+	want := filepath.Join(home, ".metatree", "config.toml")
 	if got != want {
 		t.Errorf("Path() = %q, want %q", got, want)
 	}

@@ -46,8 +46,38 @@ mt ls                    # list worktrees (live + dead); pipeable
 mt rm                    # pick a worktree to remove (refuses on uncommitted)
 mt prune                 # bulk-remove all dead worktrees (with confirm)
 mt bind                  # install tmux keybindings — run once after install
+mt setup                 # configure repos_dirs + claude_cmd (or use flags)
+mt upgrade               # download the latest release; replace this binary
 mt --help
 ```
+
+## First run
+
+The first time you run any `mt` command, it bootstraps a config:
+
+- If you have any of `~/Developer`, `~/Code`, `~/dev`, `~/src`, `~/Projects` (etc.) under your home, mt seeds `repos_dirs` from those and writes `~/.metatree/config.toml` silently. Zero prompts.
+- If none exist and stdin is a terminal, you get **one** prompt: "Where do you keep your code?" — hit Enter to accept the bracketed default, or type a comma-separated list.
+- If you already had `~/.config/mt/config.toml` from before v1.1, it's auto-copied to `~/.metatree/config.toml` once with a stderr notice. The legacy file isn't deleted; clean it up when you're ready.
+
+You can re-enter setup at any time with `mt setup` (interactive) or non-interactively:
+
+```
+mt setup --repos-dirs ~/work,~/oss
+mt setup --claude-cmd "claude --mcp-config ~/.claude/mcp.json"
+mt setup --print          # dump resolved config to stdout
+mt setup --reset          # forget current; rewrite from defaults
+```
+
+Setting `claude_cmd` literally (with all the flags you want) is the recommended way to load MCP — no shell aliases, no surprises.
+
+## Upgrading
+
+```sh
+mt upgrade           # fetch latest release, verify checksum, atomic replace
+mt upgrade --check   # report current vs latest, no download
+```
+
+Your `~/.metatree/config.toml` is never touched — that's the whole point of the directory split.
 
 ## A weekday with `mt`
 
@@ -66,15 +96,12 @@ mt --help
 
 ## Config
 
-`~/.config/mt/config.toml`. Empty file is valid; everything defaults.
+`~/.metatree/config.toml`. Created by `mt setup` (or auto-seeded on first run if a common dev folder exists). Empty file is valid; everything defaults.
 
 ```toml
 # directories to scan for git repos (depth ≤ 4).
-# If unset, mt probes common dev folders under $HOME and uses every
-# one that exists: ~/Developer, ~/Code, ~/code, ~/Projects, ~/projects,
-# ~/dev, ~/src, ~/git, ~/repos, ~/workspace.
-# Set this if you keep code somewhere else (e.g. ~/work).
-# repos_dirs = ["~/work"]
+# Set via `mt setup --repos-dirs ~/work,~/oss` or edit by hand.
+repos_dirs = ["~/Code"]
 
 # OR explicit list (overrides repos_dirs if set)
 # repos = ["~/Code/acme-api", "~/Code/bytemark-web"]

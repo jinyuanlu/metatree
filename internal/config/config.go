@@ -73,11 +73,16 @@ func (b *flexBool) UnmarshalTOML(data any) error {
 func (b flexBool) Bool() bool { return bool(b) }
 
 // defaultReposDirCandidates lists common locations users keep their
-// code on macOS and Linux, in priority order. Default() probes each one
-// and includes those that exist as directories. Order matters for
-// user-visible output (e.g. `mt diagnose`) — we prefer Apple's blessed
-// `~/Developer` first on macOS, then conventional capitalized variants,
-// then lowercase Unix conventions.
+// code on macOS and Linux, in priority order. DiscoverReposDirs probes
+// each one and returns those that exist. Order matters for the order
+// they appear in `mt setup`'s default-suggestion line — we prefer
+// Apple's blessed `~/Developer` first, then conventional capitalized
+// variants, then lowercase Unix conventions.
+//
+// Important: this list is no longer applied silently at runtime. It's
+// only consulted by `mt setup` (and the implicit first-run setup) as
+// the bracketed default of the repos_dirs prompt. Default() returns
+// empty ReposDirs so configuration is always explicit.
 var defaultReposDirCandidates = []string{
 	"Developer", // Apple's recommended location, gets a special Finder icon
 	"Code",      // common for JetBrains/VSCode users
@@ -95,14 +100,13 @@ var defaultReposDirCandidates = []string{
 // documented in mt.sh (the bash reference implementation). Mutating the
 // returned pointer is safe — it's a fresh value every call.
 //
-// ReposDirs is populated by probing every entry in
-// defaultReposDirCandidates against the user's HOME and including those
-// that exist. If none exist, the slice is empty; callers see a clear
-// "no repos found; configure repos_dirs in <path>" error rather than a
-// silently-broken `~/Code` default.
+// ReposDirs is intentionally empty. Callers that need a default
+// suggestion (e.g. mt setup) should call DiscoverReposDirs() explicitly.
+// Runtime code that hits an empty ReposDirs falls through to a clear
+// "run mt setup" error instead of a silently-broken probe.
 func Default() *Config {
 	return &Config{
-		ReposDirs:        discoverDefaultReposDirs(),
+		ReposDirs:        nil,
 		Repos:            nil,
 		TmuxSession:      "mt",
 		TmuxWindow:       "dashboard",
@@ -117,10 +121,12 @@ func Default() *Config {
 	}
 }
 
-// discoverDefaultReposDirs returns the subset of
-// defaultReposDirCandidates that exist as directories under $HOME.
-// Returns nil if none match (rather than `~/Code`-as-fake-default).
-func discoverDefaultReposDirs() []string {
+// DiscoverReposDirs returns the subset of defaultReposDirCandidates
+// that exist as directories under $HOME, in priority order. Returns
+// nil if none match. Used by mt setup as the bracketed default for
+// the repos_dirs prompt — never applied at runtime to avoid hidden
+// behavior across machines.
+func DiscoverReposDirs() []string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return nil
@@ -137,15 +143,76 @@ func discoverDefaultReposDirs() []string {
 	return found
 }
 
-// Path returns the resolved configuration path. $MT_CONFIG wins if set;
-// otherwise we fall back to ~/.config/mt/config.toml. We do not stat the
-// path here — Load() owns the "missing-file is fine" decision.
+// Path returns the resolved canonical configuration path. $MT_CONFIG
+// wins if set; otherwise the canonical location is ~/.metatree/config.toml.
+// We do not stat the path here — Load() and the firstrun migration own
+// the "missing-file is fine" decision.
+//
+// Why ~/.metatree/ and not ~/.config/mt/? Per-machine first-run setup
+// data needs to survive `mt upgrade`, and a single visible directory
+// is easier for users to find and back up than an XDG-compliant path
+// buried under .config. The legacy ~/.config/mt/config.toml is still
+// read once on first run via LegacyPath() — see firstrun.EnsureConfig.
 func Path() string {
 	if p := os.Getenv("MT_CONFIG"); p != "" {
 		return p
 	}
 	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".metatree", "config.toml")
+}
+
+// LegacyPath returns the pre-v1.1 config location. Read-only consumers:
+// firstrun.EnsureConfig migrates this file to Path() on first invocation
+// after upgrade; nothing else should touch it.
+func LegacyPath() string {
+	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "mt", "config.toml")
+}
+
+// Save writes cfg to path as TOML, creating parent dirs as needed.
+// The file is written via temp+rename so a crash mid-write can't leave
+// a half-written config. Permissions: 0o755 on the dir, 0o600 on the
+// file (config may eventually contain tokens; default to user-only).
+//
+// Path is set on cfg as a side effect so callers that immediately use
+// cfg can rely on cfg.Path being current.
+func Save(cfg *Config, path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("config save: mkdir %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".config.toml.*")
+	if err != nil {
+		return fmt.Errorf("config save: tempfile in %s: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	// Best-effort cleanup if anything below fails.
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if _, err := fmt.Fprintln(tmp, "# mt configuration — managed by `mt setup`. Edit by hand if you prefer."); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("config save: write header: %w", err)
+	}
+	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("config save: encode: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return fmt.Errorf("config save: chmod: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("config save: close tempfile: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		cleanup()
+		return fmt.Errorf("config save: rename %s -> %s: %w", tmpPath, path, err)
+	}
+	cfg.Path = path
+	return nil
 }
 
 // Load builds a Config by overlaying the on-disk TOML file (if present) on

@@ -51,11 +51,15 @@ usage:
   mt switch [-z]     fzf jump to any pane (live or dead — dead ones revive)
   mt prune [--force] remove all dead worktrees in one shot (interactive confirm)
   mt bind            install tmux keybindings (prefix+g/G/N/R) for in-agent use
+  mt setup           configure repos_dirs and claude_cmd (interactive or flags)
+  mt upgrade         download the latest release and replace this binary
   mt diagnose        print state for debugging (versions, config, bindings, log)
   mt --version       print build identity (tag, commit, build date)
   mt --help
 
-config: ~/.config/mt/config.toml — empty file is valid (all fields default)
+config: ~/.metatree/config.toml — created by 'mt setup' (or auto-seeded
+        on first run if a common dev folder exists under $HOME).
+        Legacy ~/.config/mt/config.toml is auto-migrated once.
 docs:   https://github.com/jinyuanlu/metatree
 `
 
@@ -138,12 +142,15 @@ func RunDiagnose(env *Env, args []string) error {
 	fmt.Fprintf(out, "  tmux_window:      %s\n", env.Config.TmuxWindow)
 	fmt.Fprintf(out, "  default_backend:  %s\n", env.Config.DefaultBackend)
 	if len(env.Config.ReposDirs) == 0 {
-		fmt.Fprintf(out, "  repos_dirs:       (none — set in %s or create one of: ~/Code ~/Developer ~/dev ~/src)\n",
-			config.Path())
+		fmt.Fprintln(out, "  repos_dirs:       (none — run `mt setup`)")
 	} else {
 		fmt.Fprintf(out, "  repos_dirs:       %s\n", strings.Join(env.Config.ReposDirs, " "))
 	}
 	fmt.Fprintf(out, "  repos:            %s\n", strings.Join(env.Config.Repos, " "))
+	fmt.Fprintf(out, "  claude_cmd:       %s\n", env.Config.ClaudeCmd)
+	if r := LastFirstRunResult(); r != "" {
+		fmt.Fprintf(out, "  first-run note:   %s this invocation\n", r)
+	}
 	fmt.Fprintln(out)
 
 	fmt.Fprintln(out, "TMUX STATE")
