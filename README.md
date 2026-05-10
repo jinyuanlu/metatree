@@ -98,23 +98,51 @@ auto_direnv_allow = "true"
 
 > **What is the "prefix"?** Tmux's modifier key. Default: **`Ctrl+b`**. You press it, release, then press the next key — like a two-stage chord. Check yours with `tmux show-options -g prefix`. (Many people remap it to `Ctrl+a` in `~/.tmux.conf`.)
 
-These are the shortcuts you'll actually use every day with `mt`:
+The killer move: **switch repos from inside an agent**. Once you've run `mt bind` (one-time), every shortcut below works while Claude or Ollama is mid-prompt — tmux intercepts the keystrokes before they reach the agent.
 
 | Keys             | What it does                                  | When you reach for it                              |
 | ---------------- | --------------------------------------------- | -------------------------------------------------- |
 | `mt`             | attach to (or create) the dashboard           | first thing every morning                          |
-| `prefix + ←/→/↑/↓` | switch focus between tiled panes              | jump between repos on the dashboard                |
+| `mt bind`        | install tmux popups for in-agent jumps        | one-time, right after install                      |
+| **`prefix + g`** | **fzf-jump to any pane and zoom it**          | **the high-frequency switch — works inside Claude** |
+| `prefix + G`     | fzf-jump to any pane (no zoom)                | switch but keep the overview                       |
+| `prefix + N`     | popup `mt new` — create a new worktree        | spin up a session without leaving the agent        |
+| `prefix + R`     | popup `mt rm` — remove a worktree             | retire a session without leaving the agent         |
+| `prefix + ←/→/↑/↓` | switch focus between tiled panes              | precise spatial nav when panes are visible         |
 | `prefix + z`     | zoom one pane to fullscreen / toggle back     | focus one agent, then return to the overview       |
-| `prefix + s`     | **session chooser** — the "orchestration board" | see all `mt` sessions side-by-side, pick one       |
+| `prefix + s`     | session chooser — the "orchestration board"   | switch between separate `mt` sessions              |
 | `prefix + w`     | window/pane chooser with live previews        | find a specific pane fast across windows           |
-| `prefix + d`     | detach the session                            | end of day, leaving the room — agents keep running |
-| `prefix + [`     | enter scroll/copy mode (`q` to exit)          | read agent output above the visible viewport       |
+| `prefix + d`     | detach the session                            | end of day — agents keep running                   |
+| `prefix + [`     | enter scroll/copy mode (`q` to exit)          | read agent output above the viewport               |
 | `prefix + ?`     | show every tmux keybinding interactively      | self-help when you forget one                      |
-| `prefix + space` | cycle layout (rarely needed — mt re-tiles)    | only after manual pane resizing                    |
 
-`mt new`, `mt ls`, `mt rm`, `mt show` — these are mt's commands and run from any shell, not from tmux's command prompt.
+`mt new`, `mt ls`, `mt rm`, `mt switch`, `mt show`, `mt bind` — run from any shell. The `prefix +` keys above pop them up in an overlay so they're reachable from inside an agent.
 
-The "orchestration board" Conductor-style users ask about *is* `prefix + s` (sessions) plus `prefix + w` (windows). Native tmux, no Electron, no daemon.
+### Switching repos from inside Claude (the daily flow)
+
+You're typing into Claude in `acme-api:fix-cookie`. You want to glance at `bytemark-web:add-export`. **Press `prefix + g`**:
+
+1. A popup appears with fzf, listing every active pane.
+2. Type `byte` (or any substring of repo or branch).
+3. Press `enter`.
+4. The popup vanishes. The matching pane is focused and zoomed.
+
+Claude in the original pane is untouched — it never saw your keystrokes. To go back: `prefix + g` again, type `acme`, enter.
+
+This is the affordance Conductor users ask for. It's `prefix + g` on a tmux popup with fzf — about 10 lines of bash in `mt.sh`, no daemon, no Electron, works in Terminal.app.
+
+### Make the bindings permanent
+
+`mt bind` sets keys on the running tmux server only. To survive restarts, add to `~/.tmux.conf`:
+
+```
+bind-key g display-popup -w 80% -h 60% -E "mt switch -z"
+bind-key G display-popup -w 80% -h 60% -E "mt switch"
+bind-key N display-popup -w 80% -h 60% -E "mt new"
+bind-key R display-popup -w 80% -h 60% -E "mt rm"
+```
+
+Then `tmux source ~/.tmux.conf`. Requires tmux 3.2+ (for `display-popup`).
 
 ### Detach and resume
 

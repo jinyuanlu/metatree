@@ -201,8 +201,12 @@ Four commands. No flags beyond `--help` and a single `--with` selector for backe
 | `mt ls`                                | List all worktrees across tracked repos. Shows `(repo, branch, path, backend, pane_state)` where `pane_state ∈ {live, dead}`. Pipeable: `mt ls \| grep feat-` to filter.                                                                              |
 | `mt rm [--force]`                      | Pick a worktree (fzf), remove it via `git worktree remove`, kill its tmux pane if present, re-tile the dashboard. **Refuses if the worktree has uncommitted changes** — propagates `git`'s warning. `--force` bypasses by passing `--force` through to `git worktree remove`. |
 | `mt show`                              | Attach to (or create) the `mt:dashboard` window. **Autocreates the tmux session and window if missing** — works as the first command of the day even if `tmux` was killed overnight. No-op if already focused there.                                  |
+| `mt switch [-z]`                       | fzf jump to any pane on the dashboard by `<repo>:<branch>` substring. `-z` zooms the chosen pane. Designed to be invoked from a `tmux display-popup` so it's reachable from inside an active agent. |
+| `mt bind`                              | Install tmux keybindings (`prefix+g`, `prefix+G`, `prefix+N`, `prefix+R`) on the running tmux server, each wrapping an `mt` subcommand in `display-popup`. Non-persistent — print the lines to add to `~/.tmux.conf` for permanence. Requires tmux 3.2+. |
 
 Bare `mt` with no subcommand is equivalent to `mt show`. This is the "one page, everything visible" entry point and the first action of every workday.
+
+The keybinding layer added by `mt bind` is what makes multi-repo switching tractable from inside an active agent: tmux intercepts the prefix keystroke before the agent sees it, opens `mt switch` (or `mt new`/`mt rm`) in an overlay, and returns focus to the original pane (or the chosen one). Without this, switching between repos requires leaving the agent, which is the friction §1.6 promises to remove.
 
 ### 2.4 Domain model
 

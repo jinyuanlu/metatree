@@ -251,7 +251,54 @@ pass "direnv NOT invoked when auto_direnv_allow=false"
 export MT_CONFIG="$CONFIG"
 unset MT_DIRENV_LOG
 
-section "11. credentials.json is untouched (auth invariant §1.4)"
+section "11. mt switch focuses the chosen pane"
+# we have ≥2 panes from earlier sections (envrc-test plus dirty-branch was rm'd).
+# create one more so we have a deterministic 2-pane state, then switch.
+MT_REPO="$FIXTURE_REPO" MT_BRANCH="switch-target" "$MT" new --with claude >/dev/null 2>&1 &
+MT_PID=$!
+sleep 1
+kill "$MT_PID" 2>/dev/null || true
+wait "$MT_PID" 2>/dev/null || true
+
+# pane title we want to switch to (created in section 6, still alive)
+target_title="acme-api:add-feature"
+# verify it exists before we try to switch
+tmux list-panes -t mt-smoke:dashboard -F '#{pane_title}' | grep -qx "$target_title" \
+  || { tmux list-panes -t mt-smoke:dashboard -F '#{pane_title}' >&2; fail "expected target pane $target_title not present"; }
+
+# pipe the title in so fzf auto-accepts it (fzf with stdin from grep -F selects first match)
+# easier: stub fzf to echo the matching line.
+SWITCH_STUB="$TMP/stub-switch"
+mkdir -p "$SWITCH_STUB"
+cat > "$SWITCH_STUB/fzf" <<STUB
+#!/usr/bin/env bash
+# pick the first row whose first column matches \$MT_TEST_TARGET, else exit 1
+awk -v t="\$MT_TEST_TARGET" '\$1 == t { print; found=1; exit } END { exit !found }'
+STUB
+chmod +x "$SWITCH_STUB/fzf"
+
+PATH="$SWITCH_STUB:$PATH" MT_TEST_TARGET="$target_title" "$MT" switch >/dev/null 2>&1 &
+MT_PID=$!
+sleep 1
+kill "$MT_PID" 2>/dev/null || true
+wait "$MT_PID" 2>/dev/null || true
+
+# the active pane should now have title $target_title
+active_title=$(tmux display-message -p -t mt-smoke:dashboard '#{pane_title}')
+[[ "$active_title" == "$target_title" ]] \
+  || fail "mt switch did not focus $target_title (active title: $active_title)"
+pass "mt switch focused $target_title"
+
+section "12. mt bind installs tmux keybindings"
+"$MT" bind >/dev/null 2>&1
+# verify each binding exists on the running server
+for key in g G N R; do
+  tmux list-keys -T prefix | grep -qE "^bind-key\s+-T prefix\s+$key\b.*display-popup" \
+    || fail "binding for prefix+$key not installed"
+done
+pass "prefix+g/G/N/R bound to display-popup mt commands"
+
+section "13. credentials.json is untouched (auth invariant §1.4)"
 # we don't actually have ~/.claude/.credentials.json in CI, but we can verify
 # that mt.sh contains zero non-comment references to it. Comments mentioning
 # the file (e.g., the header doc) are fine and expected.

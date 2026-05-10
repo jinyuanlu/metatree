@@ -132,6 +132,78 @@ attach_dashboard() {
 # ---------------------------------------------------------------------------
 cmd_show() { ensure_dashboard; attach_dashboard; }
 
+cmd_bind() {
+  tmux has-session 2>/dev/null \
+    || die "tmux server not running; start with: tmux new -d -s $MT_TMUX_SESSION"
+
+  # Bindings reachable from inside an agent (Claude/Ollama) — the prefix
+  # is intercepted by tmux before it reaches the pane, so the agent never
+  # sees the keystrokes. display-popup -E runs `mt` in an overlay window
+  # and exits when the command returns; the agent stays focused.
+  tmux bind-key g display-popup -w 80% -h 60% -E "mt switch -z"
+  tmux bind-key G display-popup -w 80% -h 60% -E "mt switch"
+  tmux bind-key N display-popup -w 80% -h 60% -E "mt new"
+  tmux bind-key R display-popup -w 80% -h 60% -E "mt rm"
+
+  cat <<EOF
+mt keybindings set on the running tmux server:
+
+  prefix + g   →  mt switch (zoom selected pane)   ← high-frequency
+  prefix + G   →  mt switch (no zoom)
+  prefix + N   →  mt new
+  prefix + R   →  mt rm
+
+Reach them from inside Claude or Ollama — tmux intercepts the prefix
+before the agent sees the keystrokes. The popup overlays the screen,
+runs fzf, and disappears the moment you press enter.
+
+These bindings live on the running tmux server only. To persist across
+restarts, add to ~/.tmux.conf:
+
+  bind-key g display-popup -w 80% -h 60% -E "mt switch -z"
+  bind-key G display-popup -w 80% -h 60% -E "mt switch"
+  bind-key N display-popup -w 80% -h 60% -E "mt new"
+  bind-key R display-popup -w 80% -h 60% -E "mt rm"
+
+Then run:  tmux source ~/.tmux.conf
+
+Requires tmux 3.2+ (display-popup). 'mt' must be on PATH from tmux's
+environment (test:  tmux display-message -p '#{LOCATION_OF_MT}' or
+just press prefix+g and see if anything happens).
+EOF
+}
+
+cmd_switch() {
+  local zoom=false
+  [[ "${1:-}" == "--zoom" || "${1:-}" == "-z" ]] && zoom=true
+
+  command -v fzf >/dev/null 2>&1 || die "fzf not found; install: https://github.com/junegunn/fzf"
+
+  tmux has-session -t="$MT_TMUX_SESSION" 2>/dev/null \
+    || die "no $MT_TMUX_SESSION dashboard found; run 'mt new' first"
+
+  # one row per pane: title | current command | pane_id (hidden key)
+  local entries
+  entries=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
+    -F '#{pane_title}|#{pane_current_command}|#{pane_id}' 2>/dev/null)
+  [[ -n "$entries" ]] || die "no panes on $MT_TMUX_SESSION:$MT_TMUX_WINDOW"
+
+  local choice
+  choice=$(printf '%s\n' "$entries" \
+    | awk -F'|' '{ printf "%-40s  %-10s  %s\n", $1, $2, $3 }' \
+    | fzf --prompt="switch> " --height=40% --with-nth=1,2 --delimiter='[[:space:]]+') \
+    || exit 1
+
+  # last whitespace-delimited token is the pane_id (e.g. %42)
+  local pane_id
+  pane_id=$(printf '%s' "$choice" | awk '{print $NF}')
+  [[ -n "$pane_id" ]] || die "could not parse pane id from selection"
+
+  tmux select-pane -t "$pane_id"
+  $zoom && tmux resize-pane -t "$pane_id" -Z
+  attach_dashboard
+}
+
 cmd_new() {
   local backend="$MT_DEFAULT_BACKEND"
   while [[ $# -gt 0 ]]; do
@@ -290,11 +362,13 @@ usage() {
 mt — tmux-native dashboard for Claude Code and Ollama across worktrees
 
 usage:
-  mt              attach to (or create) the dashboard window
-  mt show         (same as bare mt)
-  mt new [--with claude|ollama]   create a worktree + launch agent in a pane
-  mt ls           list worktrees: title, path, backend, state (live|dead)
-  mt rm [--force] pick a worktree, remove it (worktree, branch, pane all)
+  mt                 attach to (or create) the dashboard window
+  mt show            (same as bare mt)
+  mt new [--with claude|ollama]    create a worktree + launch agent in a pane
+  mt ls              list worktrees: title, path, backend, state (live|dead)
+  mt rm [--force]    pick a worktree, remove it (worktree, branch, pane all)
+  mt switch [-z]     fzf jump to any pane by repo:branch (-z to zoom)
+  mt bind            install tmux keybindings (prefix+g/G/N/R) for in-agent use
   mt --help
 
 config: ~/.config/mt/config.toml — empty file is valid (all fields default)
@@ -308,6 +382,8 @@ main() {
     new)       shift; cmd_new "$@";;
     ls)        cmd_ls;;
     rm)        shift; cmd_rm "$@";;
+    switch|sw) shift; cmd_switch "$@";;
+    bind)      cmd_bind;;
     show)      cmd_show;;
     -h|--help) usage;;
     *)         usage; exit 1;;
