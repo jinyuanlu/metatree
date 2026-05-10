@@ -64,8 +64,19 @@ func RunNew(env *Env, args []string) error {
 		return ExitWith(1, "discover repos: %v", err)
 	}
 	if len(repos) == 0 {
-		return ExitWith(1, "no repos found; configure repos_dirs in %s",
-			env.Config.Path)
+		// Disambiguate the two failure modes: nothing to scan vs.
+		// scanned-but-empty. The first is the common one when a peer
+		// installs mt and has no `~/Code`/`~/Developer`/`~/dev`/etc.
+		if len(env.Config.ReposDirs) == 0 && len(env.Config.Repos) == 0 {
+			return ExitWith(1,
+				"no repos_dirs configured and no common code folder found "+
+					"under $HOME (~/Code, ~/Developer, ~/dev, ~/src, ...). "+
+					"Add `repos_dirs = [\"~/your-folder\"]` to %s",
+				env.Config.Path)
+		}
+		return ExitWith(1,
+			"no git repos found under repos_dirs (%s); add `repos_dirs` entries to %s",
+			strings.Join(env.Config.ReposDirs, ", "), env.Config.Path)
 	}
 
 	repo, err := chooseRepo(repos, env)

@@ -137,7 +137,12 @@ func RunDiagnose(env *Env, args []string) error {
 	fmt.Fprintf(out, "  tmux_session:     %s\n", env.Config.TmuxSession)
 	fmt.Fprintf(out, "  tmux_window:      %s\n", env.Config.TmuxWindow)
 	fmt.Fprintf(out, "  default_backend:  %s\n", env.Config.DefaultBackend)
-	fmt.Fprintf(out, "  repos_dirs:       %s\n", strings.Join(env.Config.ReposDirs, " "))
+	if len(env.Config.ReposDirs) == 0 {
+		fmt.Fprintf(out, "  repos_dirs:       (none — set in %s or create one of: ~/Code ~/Developer ~/dev ~/src)\n",
+			config.Path())
+	} else {
+		fmt.Fprintf(out, "  repos_dirs:       %s\n", strings.Join(env.Config.ReposDirs, " "))
+	}
 	fmt.Fprintf(out, "  repos:            %s\n", strings.Join(env.Config.Repos, " "))
 	fmt.Fprintln(out)
 

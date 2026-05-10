@@ -72,15 +72,37 @@ func (b *flexBool) UnmarshalTOML(data any) error {
 // remember the flexBool conversion at use sites.
 func (b flexBool) Bool() bool { return bool(b) }
 
+// defaultReposDirCandidates lists common locations users keep their
+// code on macOS and Linux, in priority order. Default() probes each one
+// and includes those that exist as directories. Order matters for
+// user-visible output (e.g. `mt diagnose`) — we prefer Apple's blessed
+// `~/Developer` first on macOS, then conventional capitalized variants,
+// then lowercase Unix conventions.
+var defaultReposDirCandidates = []string{
+	"Developer", // Apple's recommended location, gets a special Finder icon
+	"Code",      // common for JetBrains/VSCode users
+	"code",      // lowercase variant
+	"Projects",
+	"projects",
+	"dev",
+	"src",
+	"git",
+	"repos",
+	"workspace",
+}
+
 // Default returns a Config with every field populated to the values
 // documented in mt.sh (the bash reference implementation). Mutating the
 // returned pointer is safe — it's a fresh value every call.
+//
+// ReposDirs is populated by probing every entry in
+// defaultReposDirCandidates against the user's HOME and including those
+// that exist. If none exist, the slice is empty; callers see a clear
+// "no repos found; configure repos_dirs in <path>" error rather than a
+// silently-broken `~/Code` default.
 func Default() *Config {
-	home, _ := os.UserHomeDir()
-	codeDir := filepath.Join(home, "Code")
-
 	return &Config{
-		ReposDirs:        []string{codeDir},
+		ReposDirs:        discoverDefaultReposDirs(),
 		Repos:            nil,
 		TmuxSession:      "mt",
 		TmuxWindow:       "dashboard",
@@ -93,6 +115,26 @@ func Default() *Config {
 		AutoDirenvAllow:  true,
 		AutoStatusChrome: true,
 	}
+}
+
+// discoverDefaultReposDirs returns the subset of
+// defaultReposDirCandidates that exist as directories under $HOME.
+// Returns nil if none match (rather than `~/Code`-as-fake-default).
+func discoverDefaultReposDirs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	var found []string
+	for _, name := range defaultReposDirCandidates {
+		p := filepath.Join(home, name)
+		fi, err := os.Stat(p)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		found = append(found, p)
+	}
+	return found
 }
 
 // Path returns the resolved configuration path. $MT_CONFIG wins if set;

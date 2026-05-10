@@ -35,11 +35,16 @@ func TestDefault(t *testing.T) {
 	}
 
 	// Spot-check every field is populated. Strings must be non-empty;
-	// the slice must be non-empty; bools have an explicit expected value
-	// (zero-value matches the spec, so a positive assertion catches drift).
-	if len(cfg.ReposDirs) == 0 {
-		t.Error("ReposDirs is empty")
-	}
+	// bools have an explicit expected value (zero-value matches the
+	// spec, so a positive assertion catches drift).
+	//
+	// Note: ReposDirs is intentionally NOT asserted non-empty here.
+	// Default() probes ~/Code, ~/Developer, ~/dev, etc. and returns
+	// the subset that exists. On a CI runner with a clean home
+	// directory, the slice is empty — and that's correct: the user
+	// gets a clear "configure repos_dirs" error instead of a
+	// silently-broken `~/Code` placeholder. See
+	// TestDefaultReposDirsProbesCommonDirs for the discovery contract.
 	if cfg.TmuxSession != "mt" {
 		t.Errorf("TmuxSession = %q, want %q", cfg.TmuxSession, "mt")
 	}
@@ -76,14 +81,57 @@ func TestDefaultIsFresh(t *testing.T) {
 	// Defensive: mutating one Default() must not leak into the next.
 	a := Default()
 	a.TmuxSession = "scribbled"
+	beforeLen := len(a.ReposDirs)
 	a.ReposDirs = append(a.ReposDirs, "/tmp/x")
 
 	b := Default()
 	if b.TmuxSession != "mt" {
 		t.Errorf("Default() returned shared state: TmuxSession = %q", b.TmuxSession)
 	}
-	if len(b.ReposDirs) != 1 {
-		t.Errorf("Default() returned shared ReposDirs slice: %v", b.ReposDirs)
+	if len(b.ReposDirs) != beforeLen {
+		t.Errorf("Default() returned shared ReposDirs slice: got len %d, want %d",
+			len(b.ReposDirs), beforeLen)
+	}
+}
+
+// TestDefaultReposDirsProbesCommonDirs verifies the discovery logic:
+// override HOME to a tempdir, create a subset of the candidate dirs,
+// and check that Default() returns exactly those that exist (in the
+// expected priority order).
+func TestDefaultReposDirsProbesCommonDirs(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	// Create a representative subset out of priority order to confirm
+	// the result preserves candidate-list order, not filesystem order.
+	for _, name := range []string{"dev", "Developer", "src"} {
+		if err := os.MkdirAll(filepath.Join(tmp, name), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", name, err)
+		}
+	}
+
+	cfg := Default()
+	want := []string{
+		filepath.Join(tmp, "Developer"),
+		filepath.Join(tmp, "dev"),
+		filepath.Join(tmp, "src"),
+	}
+	if !reflect.DeepEqual(cfg.ReposDirs, want) {
+		t.Errorf("ReposDirs = %v, want %v", cfg.ReposDirs, want)
+	}
+}
+
+// TestDefaultReposDirsEmptyWhenNoneExist confirms the slice is empty
+// (not nil-vs-empty-confused, not a phantom `~/Code` entry) when none
+// of the candidate dirs exist. The downstream "no repos found" error
+// then asks the user to configure repos_dirs explicitly.
+func TestDefaultReposDirsEmptyWhenNoneExist(t *testing.T) {
+	tmp := t.TempDir() // has nothing under it
+	t.Setenv("HOME", tmp)
+
+	cfg := Default()
+	if len(cfg.ReposDirs) != 0 {
+		t.Errorf("expected empty ReposDirs in HOME=%s, got %v", tmp, cfg.ReposDirs)
 	}
 }
 

@@ -69,8 +69,12 @@ mt --help
 `~/.config/mt/config.toml`. Empty file is valid; everything defaults.
 
 ```toml
-# directories to scan for git repos (depth ≤ 4)
-repos_dirs = ["~/Code"]
+# directories to scan for git repos (depth ≤ 4).
+# If unset, mt probes common dev folders under $HOME and uses every
+# one that exists: ~/Developer, ~/Code, ~/code, ~/Projects, ~/projects,
+# ~/dev, ~/src, ~/git, ~/repos, ~/workspace.
+# Set this if you keep code somewhere else (e.g. ~/work).
+# repos_dirs = ["~/work"]
 
 # OR explicit list (overrides repos_dirs if set)
 # repos = ["~/Code/acme-api", "~/Code/bytemark-web"]
