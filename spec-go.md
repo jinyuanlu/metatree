@@ -12,14 +12,14 @@
 
 ## 1. Why Go
 
-`mt.sh` reached ~640 lines and accumulated bugs that were exclusively
-language-shape: `set -e` interactions with pipefail and SIGPIPE, `local` lifetime
-under EXIT traps, ad-hoc TOML parsing, IFS edge cases, macOS path symlink
-mismatches under `pwd -P`. None of these are interesting product bugs. They are
-the language fighting the implementer.
+`mt.sh` accumulated bugs that were exclusively language-shape: `set -e`
+interactions with pipefail and SIGPIPE, `local` lifetime under EXIT traps,
+ad-hoc TOML parsing, IFS edge cases, macOS path symlink mismatches under
+`pwd -P`. None of these are interesting product bugs. They are the language
+fighting the implementer.
 
 Go is the spec's documented escape hatch (see `spec.md` §2.11 V2 backlog #5).
-At ~640 lines of bash we are clearly past the boundary.
+The bash prototype proved the design; the Go port hardens the implementation.
 
 ### Goals of the port
 
@@ -30,8 +30,9 @@ At ~640 lines of bash we are clearly past the boundary.
    Existing `mt bind`, `mt diagnose` outputs stay structurally identical.
 3. **Better internals.** Typed errors, explicit boundaries, table-driven
    tests, no shell-level surprises.
-4. **Same audit posture.** The repository remains short enough to read in
-   one sitting (target: ≤2,000 lines of Go for the entire core).
+4. **Same audit posture.** The repository stays short enough to read in
+   one sitting; new contributors should be able to make a typo fix without
+   reading the whole tree.
 5. **Same distribution speed.** `curl | bash` install completes in under
    two seconds, fetching a single static binary from GitHub Releases.
 
@@ -57,7 +58,7 @@ If you are new to the codebase, read in this order:
    reference for behaviors and types.
 2. This document — the architecture.
 3. `cmd/mt/main.go` — the entry point. Dispatches to one function per
-   subcommand. Reading it gives you the surface in 60 lines.
+   subcommand. Reading it gives you the surface at a glance.
 4. `internal/command/<name>.go` — pick any one. Each file is a single
    subcommand and reads top-to-bottom.
 
@@ -71,13 +72,13 @@ Three layers, dependency arrow points down. **No upward calls.**
 
 ```
                     ┌─────────────────────────────┐
-                    │         cmd/mt              │   entry point, ~80 lines
+                    │         cmd/mt              │   entry point
                     │  argv → command → exit code │
                     └──────────────┬──────────────┘
                                    ▼
             ┌──────────────────────┴──────────────────────┐
-            │              internal/command               │   one file per subcommand
-            │  Run(env *Env, args []string) error          │
+            │              internal/command               │   subcommand impls
+            │  Run(env *Env, args []string) error          │   grouped 3 files
             │   ls │ new │ rm │ switch │ prune │ bind ...   │
             └────────────────┬─────────────┬────────────────┘
                              ▼             ▼
@@ -95,7 +96,7 @@ Three layers, dependency arrow points down. **No upward calls.**
          └─────────┘ └────────────┘
                               │
                        ┌──────┴───────┐
-                       │   mtlog      │   invocation log (~50 lines)
+                       │   mtlog      │   invocation log
                        │              │   write-only, best-effort
                        └──────────────┘
 ```
@@ -143,15 +144,9 @@ metatree/
 │   │   └── dashboard_test.go
 │   └── command/
 │       ├── env.go                   # Env type passed to every Run
-│       ├── help.go
-│       ├── diagnose.go
-│       ├── ls.go
-│       ├── show.go
-│       ├── new.go
-│       ├── rm.go
-│       ├── prune.go
-│       ├── switch.go                # filename: switchcmd.go (switch is reserved)
-│       └── bind.go
+│       ├── lifecycle.go             # new, rm, prune (worktree state changes)
+│       ├── navigation.go            # switch, show, ls (read or focus existing)
+│       └── meta.go                  # bind, diagnose, help (about mt itself)
 ├── tests/
 │   ├── smoke.sh                     # carried over from bash, runs against Go binary
 │   ├── mt.bats                      # carried over, optional
@@ -173,21 +168,20 @@ metatree/
 └── README.md
 ```
 
-### Package size budget (soft, expressed in lines of Go)
+### Package responsibilities
 
-| Package      | Target  | Hard ceiling | Reason                                      |
-| ------------ | ------- | ------------ | ------------------------------------------- |
-| `cmd/mt`     |     80  |    120       | argv → dispatch → exit code; trivially flat |
-| `config`     |    150  |    250       | TOML schema, Default, Load                  |
-| `mtlog`      |     60  |    100       | append-only file writer + tail              |
-| `tmuxio`     |    250  |    400       | one wrapper per tmux verb mt uses           |
-| `gitio`      |    150  |    250       | discover_worktrees, parent_repo_of, status  |
-| `dashboard`  |    300  |    500       | chrome, bindings, pane registry             |
-| `command/*`  |    600  |   1000       | nine subcommands, ~60-110 lines each        |
-| **Total**    | **~1,600** | **~2,600** | smoke.sh + mt.bats stay outside this        |
+| Package      | Job                                                                  |
+| ------------ | -------------------------------------------------------------------- |
+| `cmd/mt`     | argv → subcommand dispatch → exit code; nothing else                 |
+| `config`     | TOML schema, defaults, load (single source of truth for config)      |
+| `mtlog`      | append-only invocation log; best-effort, never fails the caller      |
+| `tmuxio`     | one wrapper per tmux verb mt uses; only package that calls tmux      |
+| `gitio`      | worktree discovery, parent_repo_of, git-crypt setup; only git caller |
+| `dashboard`  | chrome, popup bindings, pane registry (`@mt-managed`)                |
+| `command/`   | three files (lifecycle, navigation, meta); orchestrate, no I/O       |
 
-If a package crosses its hard ceiling, the package needs a split — not more
-indirection.
+If a package starts doing the job of another, split it — don't add
+indirection. Boundary tests in CI assert the import graph stays clean.
 
 ---
 
@@ -566,15 +560,20 @@ func main() {
 
 ### Adding a new subcommand
 
-1. Create `internal/command/<name>.go` with `func Run<Name>(env *Env, args []string) error`.
+1. Add `func Run<Name>(env *Env, args []string) error` to the appropriate
+   file in `internal/command/`:
+   - `lifecycle.go` for state-changing commands (new, rm, prune-style)
+   - `navigation.go` for read/focus commands (switch, ls, show-style)
+   - `meta.go` for tool-introspection commands (bind, diagnose, help-style)
 2. Add a case to `dispatch()` in `cmd/mt/main.go`.
-3. Add the usage line to `command/help.go`.
+3. Add the usage line to the help text in `meta.go`.
 4. Add an integration test in `tests/integration_test.go`.
 5. Add a smoke section to `tests/smoke.sh` (or assert no regression in
    existing sections).
 
-That's the entire surface change. Per-command files are the unit of
-extension.
+Three command files instead of nine — each groups commands by purpose.
+Easier to navigate than per-command files; each function is still its own
+unit, just sitting next to its purpose-mates.
 
 ---
 
@@ -593,6 +592,33 @@ Three tiers, mirroring `tests/smoke.sh` from the bash version.
   assert correct parent for both mt-style and claude-style worktrees.
 
 Target: ~80% coverage on packages that don't shell out.
+
+### Tier 2.5 — Named integration tests (commit-1 checklist)
+
+Each row commits to a named test in `tests/integration_test.go`. The
+implementer doesn't decide what to write; they decide when to write it.
+
+| Test name                          | Asserts                                                | Smoke parallel       |
+|------------------------------------|--------------------------------------------------------|----------------------|
+| `TestNewCreatesWorktreeAndPane`    | happy path: worktree + branch + pane + @mt-managed     | §3                   |
+| `TestNewIdempotent`                | second `mt new` on same (repo, branch) focuses existing | §5                   |
+| `TestNewClaudeStyleWorktreeRevive` | discovers `.claude/worktrees/<task>` via git           | (new — gap-fill)     |
+| `TestNewInGitCryptRepo`            | --no-checkout + key copy + checkout cycle              | §14                  |
+| `TestNewOSCClobberSurvival`        | pane_title hijacked → next `new` still splits          | §18                  |
+| `TestRmCleanWorktree`              | removes worktree + branch + pane                       | §7                   |
+| `TestRmRefusesDirty`               | dirty worktree → refuses without --force               | §8                   |
+| `TestRmForceBypass`                | `--force` removes dirty worktree                       | §9                   |
+| `TestPruneAllDead`                 | dead-only sweep, live preserved                        | §15                  |
+| `TestSwitchExcludesDeadEntries`    | popup picker shows live + create only                  | §16                  |
+| `TestSwitchEmptyShowsCreate`       | empty dashboard → "+Create" entry only                 | (new — gap-fill)     |
+| `TestSwitchAutoDetectsSession`     | `$TMUX` set → uses calling session, not config         | (regression case)    |
+| `TestPathSymlinkResolution`        | macOS /tmp ↔ /private/tmp paths compare correctly      | (regression case)    |
+| `TestBindInstallsAllFour`          | g/G/N/R bound, all using absolute mt path              | §12                  |
+| `TestShowAutoCreatesAndBinds`      | fresh server → session + bindings + attach in one shot | §1, §17              |
+| `TestDiagnosePrintsAllSections`    | VERSIONS / CONFIG / TMUX / KEYBINDINGS / LOG sections  | §17 partial          |
+
+Each commit lands its slice of this table alongside the feature code.
+Implementer doesn't decide what to write; they decide when to write it.
 
 ### Tier 2 — integration tests (Go, real tmux + git)
 
@@ -651,7 +677,7 @@ chmod +x "$DEST/mt"
 echo "installed: $DEST/mt"
 ```
 
-Audit-friendly: ~30 lines. The user can read it before piping.
+Audit-friendly: short enough to read before piping into bash.
 
 ### `.goreleaser.yaml`
 
@@ -697,6 +723,46 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
 
+### `.github/workflows/ci.yml`
+
+Runs on every push and PR. Required to merge.
+
+```yaml
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: macos-latest        # tmux + macOS-specific path quirks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.25" }
+      - run: brew install tmux fzf
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          [ -z "$out" ] || { echo "$out"; exit 1; }
+      - name: vet
+        run: go vet ./...
+      - name: unit + integration (with -race)
+        run: go test -race ./...
+      - name: smoke
+        run: bash tests/smoke.sh
+      - name: auth invariant — no credential refs in source
+        run: |
+          if grep -rE '(ANTHROPIC_|credentials\.json)' --include='*.go' . \
+             | grep -vE '^[^:]+:[[:space:]]*//' >/dev/null; then
+            echo "ERROR: non-comment reference to credentials.json or ANTHROPIC_ in Go source"
+            grep -rnE '(ANTHROPIC_|credentials\.json)' --include='*.go' . \
+              | grep -vE '^[^:]+:[[:space:]]*//'
+            exit 1
+          fi
+```
+
+The auth-invariant grep step is mandatory. It's the central promise of `mt`
+(see `spec.md` §1.4); the smoke test catches it post-build, this catches it
+at PR time before any binary exists. Defense in depth.
+
 ### Power-user fallback
 
 ```sh
@@ -715,11 +781,12 @@ formula automatically once we add a `homebrew_tap` repo.
 
 ## 16. Migration plan
 
-Six commits, each a working binary.
+Eight commits, each shipping a verifiable artifact.
 
 | Commit | What ships | Verifiable by |
 |--------|------------|---------------|
-| 1 | skeleton + `config` + `mtlog` + `mt --help` + `mt diagnose` | `go test ./...`, manual `mt diagnose` |
+| 0 | freeze `mt.sh`: README banner, no further commits to it; bug fixes go to Go only | git log shows mt.sh untouched after this commit |
+| 1 | skeleton + `config` + `mtlog` + `mt --help` + `mt diagnose` + `ci.yml` | `go test ./...`, manual `mt diagnose`, CI green |
 | 2 | `mt ls` (read-only, exercises gitio + dashboard) | smoke §2 |
 | 3 | `mt show` + `mt bind` (tmux state, bindings) | smoke §1, §12, §17 |
 | 4 | `mt new` + `mt rm` (worktree lifecycle) | smoke §3, §5, §6, §7, §8, §9 |
@@ -777,40 +844,36 @@ Lessons from porting the bash. If you see these in a PR, push back.
 
 ---
 
-## 18. Open questions
+## 18. Decisions (locked before commit 1)
 
-To resolve before commit 1:
+These were "open questions" in earlier drafts. Each is locked here so the
+implementation has a contract, not five guesses.
 
-1. **Top-level type names.** Some live in `cmd/mt`, some in a tiny shared
-   `internal/mt` package. The minimal shared set: `Backend`, `Branch`. The
-   rest are package-local. Lean toward "no shared package; duplicate the two
-   small ones if needed" since cross-package imports of fundamental types
-   create fragile coupling.
+1. **Top-level type names.** No shared `internal/mt` package. `Backend`
+   and `Branch` (the two cross-cutting types) are duplicated where needed.
+   Cross-package imports of fundamental types create fragile coupling and
+   the duplication is trivial.
 
-2. **Subcommand argv parsing.** stdlib `flag` is awkward for subcommands but
-   has zero deps. `cobra` is the convention but adds 30K LOC to the binary
-   and a generation pipeline. Lean toward stdlib + manual dispatch — we
-   have ten subcommands, three with flags. The bash version managed without
-   a CLI framework; Go can too.
+2. **Subcommand argv parsing.** Stdlib `flag` + manual dispatch in
+   `cmd/mt/main.go`. No `cobra`. Nine subcommands, a few with simple flags
+   (`--with`, `-z`, `--force`); manual dispatch is shorter than cobra's
+   ceremony.
 
-3. **Branch name validation.** The bash version slugifies aggressively. Go
-   version: a `branch.Slugify(input) (Branch, error)` function with explicit
-   validation rules. Should bare `mt-style/` prefix get auto-prepended in
-   the Go API or stay a config concern? Lean toward "config concern only" —
-   the type does not know about prefixes.
+3. **Branch name validation.** A `branch.Slugify(input) (Branch, error)`
+   function with explicit validation. Returns an error if the input
+   slugifies to empty. The Slugify function knows nothing about
+   `branch_prefix` — that's a config concern applied at the call site, not
+   a property of the type.
 
-4. **Config "raw" string fields for booleans.** Bash passed booleans as
-   quoted strings (`auto_direnv_allow = "true"`). Native TOML supports both.
-   The Go decoder handles both via a custom unmarshaller, but should we
-   migrate users to native bools and deprecate strings? Lean toward
-   "both forever" — config is a contract, breaking it for cosmetic reasons
-   is rude.
+4. **Config bool string-form support.** Accept both native TOML bools
+   (`auto_direnv_allow = true`) AND string-quoted bools
+   (`auto_direnv_allow = "true"`) **forever**. Config is a contract;
+   breaking it for cosmetic reasons is rude. README's example config shows
+   native bools; the parser tolerates both.
 
-5. **Error message format.** Bash's `mt: <msg>` prefix is preserved. Multi-
-   line wrapped errors get formatted as `mt: <verb>: <verb>: <root>`. Decide
-   whether to pretty-print errors with stack-style indentation, or keep the
-   one-line colon-separated form. Lean toward one-line — matches the bash
-   convention and CLI norms.
+5. **Error message format.** One-line colon-separated:
+   `mt: <verb>: <verb>: <root>`. Matches the bash convention and CLI norms.
+   No multi-line stack-style indentation; that's what `mt diagnose` is for.
 
 ---
 
@@ -829,3 +892,19 @@ prototype."
 
 `spec.md` and `spec-go.md` get updated together. Breaking changes to either
 require a major version bump.
+
+---
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not run |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | not run |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 4 amendments locked, 1 critical gap |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | not run (CLI tool, not applicable) |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | not run |
+
+- **UNRESOLVED:** 0 (all D1–D6 decisions locked into the plan)
+- **CRITICAL GAP:** git-crypt key-missing failure mode is silent in plan §11; should log a warning to mtlog and surface via stderr. Tracked as part of plan §11 amendment, no code yet.
+- **VERDICT:** ENG REVIEW CLEARED — 6 decisions locked, plan amended with named test list, CI gates, mt.sh freeze policy, and converted-to-decisions §18. Ready to implement starting at commit 0 (mt.sh freeze).
