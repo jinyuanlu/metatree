@@ -1,6 +1,12 @@
-# `mt` (metatree) — Specification
+# `mt` (metatree) — Product Specification
 
 > Binary name `mt`. Project directory `metatree`. Rename if either conflicts with anything in your existing toolchain.
+>
+> This document defines the **product**: commands, behaviors, acceptance
+> criteria, invariants. For the **Go implementation** (package layout,
+> error handling, testing, distribution), see [`spec-go.md`](spec-go.md).
+> The Go version is the source of truth from v1.0 onward; the bash prototype
+> at `mt.sh` is preserved as a reference implementation and is deprecated.
 
 A control-plane CLI for spawning agent sessions (Claude Code or Ollama) in fresh git worktrees, presented as a single-window tmux dashboard so multiple repos are visible and operable on one page.
 

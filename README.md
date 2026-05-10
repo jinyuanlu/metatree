@@ -174,7 +174,12 @@ The Ollama backend has no analog: local model servers have no shared credentials
 
 ## Spec
 
-The full design rationale, domain model, acceptance criteria, and failure modes live in [`spec.md`](spec.md). Worth reading if you're forking or want to understand the auth invariant in detail.
+Two documents:
+
+- **[`spec.md`](spec.md)** — the **product** spec. Commands, behaviors, acceptance criteria, the auth invariant (§1.4), the dashboard topology (§2.5), the failure-modes table (§2.8). This is the source of truth for what `mt` does.
+- **[`spec-go.md`](spec-go.md)** — the **Go implementation** spec. Package layout, error handling, testing strategy, distribution, anti-patterns. Reading this before contributing code is faster than reading the code.
+
+The current `mt.sh` is a bash prototype that grew past the language's sweet spot. The Go port is the v1.0 implementation. Both specs stay aligned through the migration; if they diverge, the product spec wins.
 
 ## What you see on the dashboard
 
