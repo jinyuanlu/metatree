@@ -1,55 +1,56 @@
 #!/usr/bin/env bash
-# install.sh — fetch mt.sh and install it to ~/.local/bin/mt
+# install.sh — fetch the mt binary from GitHub Releases.
 #
 # usage:
 #   curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
 #
-# what this does:
-#   1. downloads mt.sh from the metatree repo to ~/.local/bin/mt
-#   2. makes it executable
-#   3. prints a one-line PATH check
+# env:
+#   MT_INSTALL_DIR   override install dir (default: ~/.local/bin)
 #
-# what this does NOT do:
-#   - does not install tmux, fzf, git, claude, or ollama
-#   - does not modify your shell rc
-#   - does not run anything as root
-#
-# safe to read before piping. ≤ 50 lines.
+# Audit-friendly: short enough to read before piping into bash.
 
 set -euo pipefail
 
-REPO_URL="${MT_REPO_URL:-https://raw.githubusercontent.com/jinyuanlu/metatree/master}"
+REPO="jinyuanlu/metatree"
 INSTALL_DIR="${MT_INSTALL_DIR:-$HOME/.local/bin}"
-DEST="$INSTALL_DIR/mt"
 
-echo "mt installer"
-echo "  source: $REPO_URL/mt.sh"
-echo "  dest:   $DEST"
-echo
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64)             ASSET=mt-darwin-arm64 ;;
+  Darwin-x86_64)            ASSET=mt-darwin-amd64 ;;
+  Linux-x86_64)             ASSET=mt-linux-amd64  ;;
+  Linux-aarch64|Linux-arm64) ASSET=mt-linux-arm64 ;;
+  *) echo "unsupported: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
 
-mkdir -p "$INSTALL_DIR"
+BASE="https://github.com/${REPO}/releases/latest/download"
+TARBALL="${ASSET}.tar.gz"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
 
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$REPO_URL/mt.sh" -o "$DEST"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$DEST" "$REPO_URL/mt.sh"
+echo "mt installer  ($ASSET → $INSTALL_DIR/mt)"
+
+curl -fsSL "$BASE/$TARBALL" -o "$TMP/$TARBALL"
+
+# Verify checksum if we have curl + sha256sum (or shasum on macOS). Skip with
+# a warning otherwise — graceful degradation, not a hard fail.
+if curl -fsSL "$BASE/checksums.txt" -o "$TMP/checksums.txt" 2>/dev/null; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$TMP" && grep " $TARBALL\$" checksums.txt | sha256sum -c -)
+  elif command -v shasum >/dev/null 2>&1; then
+    (cd "$TMP" && grep " $TARBALL\$" checksums.txt | shasum -a 256 -c -)
+  else
+    echo "  (no sha256 tool found; skipping checksum verification)"
+  fi
 else
-  echo "error: need curl or wget" >&2
-  exit 1
+  echo "  (no checksums.txt in release; skipping verification)"
 fi
 
-chmod +x "$DEST"
+mkdir -p "$INSTALL_DIR"
+tar -xz -C "$INSTALL_DIR" -f "$TMP/$TARBALL" mt
+chmod +x "$INSTALL_DIR/mt"
 
-echo "installed: $DEST"
-echo
-
+echo "installed: $INSTALL_DIR/mt"
 case ":$PATH:" in
-  *":$INSTALL_DIR:"*)
-    echo "PATH already includes $INSTALL_DIR — try: mt --help"
-    ;;
-  *)
-    echo "add to your shell rc:"
-    echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-    echo "then: mt --help"
-    ;;
+  *":$INSTALL_DIR:"*) echo "PATH ok — try: mt --help" ;;
+  *) echo "add to your shell rc:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac

@@ -1,0 +1,37 @@
+# .goreleaser.yaml — release matrix for mt.
+# Build: darwin/linux × amd64/arm64. Archive as tar.gz. Emit checksums.txt
+# so install.sh can verify. ldflags strip symbols and stamp the version.
+
+version: 2
+
+project_name: mt
+
+builds:
+  - id: mt
+    main: ./cmd/mt
+    binary: mt
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - name_template: "mt-{{.Os}}-{{.Arch}}"
+    format: tar.gz
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  prerelease: auto

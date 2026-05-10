@@ -1,6 +1,10 @@
 # direnv-loaded dev config (per-developer, not shipped)
 .mt.dev.toml
 
+# Go build artifacts
+/bin/mt-go
+/dist/
+
 # direnv cache
 .direnv/
 

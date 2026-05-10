@@ -26,10 +26,23 @@ check:
     bash -n bin/mt-bats
     @echo "syntax: OK"
 
-# shellcheck (requires: brew install shellcheck)
-lint:
+# shellcheck (requires: brew install shellcheck) — bash-side lint
+lint-sh:
     @command -v shellcheck >/dev/null || { echo "shellcheck not installed: brew install shellcheck" >&2; exit 1; }
     shellcheck mt.sh install.sh tests/smoke.sh bin/mt bin/mt-test bin/mt-bats
+
+# build the Go binary into ./bin/mt-go
+build:
+    go build -o ./bin/mt-go ./cmd/mt
+
+# Go unit + integration tests with race detector
+test-go:
+    go test -race ./...
+
+# Go lint: gofmt (must be clean) + go vet
+lint:
+    go vet ./...
+    @gofmt -l . | grep -q . && exit 1 || exit 0
 
 # install local mt.sh → ~/.local/bin/mt (dev shortcut, no curl)
 install:

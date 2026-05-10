@@ -1,0 +1,70 @@
+# ci.yml — runs on every push and PR. Required to merge.
+#
+# Runs on macOS only: tmux + path-length quirks exercised by tests/smoke.sh
+# are macOS-specific. A linux runner can be added later when we're confident
+# the smoke harness is portable.
+#
+# Smoke wiring:
+#   tests/smoke.sh currently hardcodes `MT="$MT_DIR/mt.sh"`. Rather than edit
+#   smoke.sh from CI (it lives in tests/ and we want it to stay verbatim),
+#   we copy it to a tmp path and sed-rewrite the one line so MT honors an
+#   environment override. Then we point MT at the freshly-built Go binary.
+#   Once smoke.sh is updated upstream to read $MT from the environment, the
+#   sed step can be dropped.
+
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: install tmux + fzf
+        run: brew install tmux fzf
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt needs to be run on:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test (race)
+        run: go test -race ./...
+
+      - name: build mt binary
+        run: go build -o ./bin/mt-go ./cmd/mt
+
+      - name: smoke
+        run: |
+          # Wrap smoke.sh so MT points at the just-built Go binary.
+          # smoke.sh has `MT="$MT_DIR/mt.sh"` hardcoded; rewrite that one line
+          # to honor an environment override, then run from the tmp copy.
+          cp tests/smoke.sh /tmp/smoke.sh
+          sed -i '' 's|MT="$MT_DIR/mt.sh"|MT="${MT:-$MT_DIR/mt.sh}"|' /tmp/smoke.sh
+          MT="$PWD/bin/mt-go" bash /tmp/smoke.sh
+
+      - name: auth invariant — no credential refs in source
+        # Central promise of mt: never read Anthropic credentials. This step
+        # fails the build if any non-comment .go line mentions ANTHROPIC_ or
+        # credentials.json. Comment-only mentions (// ...) are allowed.
+        run: |
+          if grep -rE '(ANTHROPIC_|credentials\.json)' --include='*.go' . \
+             | grep -vE '^[^:]+:[[:space:]]*//' >/dev/null; then
+            echo "ERROR: non-comment reference to credentials.json or ANTHROPIC_ in Go source"
+            grep -rnE '(ANTHROPIC_|credentials\.json)' --include='*.go' . \
+              | grep -vE '^[^:]+:[[:space:]]*//'
+            exit 1
+          fi
