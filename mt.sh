@@ -2,6 +2,13 @@
 # mt — tmux-native control plane for Claude Code and Ollama across worktrees
 # https://github.com/jinyuanlu/metatree
 #
+# *** FROZEN ***
+# This is the bash prototype. Bug fixes and new features go to the Go
+# implementation (see spec-go.md). Install the Go binary via:
+#   curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
+#
+# This file is preserved as a reference until v2.0.0, when it will be removed.
+#
 # spec: see spec.md (auth invariant §1.4 — mt does not touch ~/.claude/.credentials.json)
 
 set -euo pipefail
