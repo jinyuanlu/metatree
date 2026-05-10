@@ -32,13 +32,14 @@ Requires: `bash`, `tmux` 3.x, `git` ≥ 2.5, `fzf`. Already on every developer M
 ## Usage
 
 ```
-mt                              # attach to (or create) the dashboard
-mt new                          # pick a repo, name a branch, launch claude in a new pane
-mt new --with ollama            # ...with a local Ollama session instead
-mt ls                           # list worktrees: title, path, backend, state
-mt ls | grep feat-              # pipeable
-mt rm                           # pick a worktree, remove it (refuses on uncommitted changes)
-mt rm --force                   # ...unless you mean it
+mt                       # attach to (or create) the dashboard
+mt new                   # pick repo + branch, launch claude in a new pane
+mt new --with ollama     # ...with a local Ollama session instead
+mt switch                # fzf-jump to any pane (revives dead ones)
+mt ls                    # list worktrees (live + dead); pipeable
+mt rm                    # pick a worktree to remove (refuses on uncommitted)
+mt prune                 # bulk-remove all dead worktrees (with confirm)
+mt bind                  # install tmux keybindings — run once after install
 mt --help
 ```
 
@@ -96,27 +97,20 @@ auto_direnv_allow = "true"
 
 ### Daily cheat sheet
 
-> **What is the "prefix"?** Tmux's modifier key. Default: **`Ctrl+b`**. You press it, release, then press the next key — like a two-stage chord. Check yours with `tmux show-options -g prefix`. (Many people remap it to `Ctrl+a` in `~/.tmux.conf`.)
+Six keys. That's it. Run `mt bind` once after install, and **`prefix + g` is the killer move** — it works while Claude or Ollama is mid-prompt because tmux intercepts the keystroke before the agent sees it.
 
-The killer move: **switch repos from inside an agent**. Once you've run `mt bind` (one-time), every shortcut below works while Claude or Ollama is mid-prompt — tmux intercepts the keystrokes before they reach the agent.
+| Keys           | What it does                                                   |
+| -------------- | -------------------------------------------------------------- |
+| `mt`           | attach to (or create) the dashboard                            |
+| `prefix + g`   | **fzf-jump to any pane** (live or dead — dead ones revive)     |
+| `prefix + N`   | popup `mt new` — create a new worktree                         |
+| `prefix + R`   | popup `mt rm` — remove a worktree                              |
+| `prefix + z`   | zoom one pane to fullscreen / toggle back                      |
+| `prefix + d`   | detach (agents keep running)                                   |
 
-| Keys             | What it does                                  | When you reach for it                              |
-| ---------------- | --------------------------------------------- | -------------------------------------------------- |
-| `mt`             | attach to (or create) the dashboard           | first thing every morning                          |
-| `mt bind`        | install tmux popups for in-agent jumps        | one-time, right after install                      |
-| **`prefix + g`** | **fzf-jump to any pane and zoom it**          | **the high-frequency switch — works inside Claude** |
-| `prefix + G`     | fzf-jump to any pane (no zoom)                | switch but keep the overview                       |
-| `prefix + N`     | popup `mt new` — create a new worktree        | spin up a session without leaving the agent        |
-| `prefix + R`     | popup `mt rm` — remove a worktree             | retire a session without leaving the agent         |
-| `prefix + ←/→/↑/↓` | switch focus between tiled panes              | precise spatial nav when panes are visible         |
-| `prefix + z`     | zoom one pane to fullscreen / toggle back     | focus one agent, then return to the overview       |
-| `prefix + s`     | session chooser — the "orchestration board"   | switch between separate `mt` sessions              |
-| `prefix + w`     | window/pane chooser with live previews        | find a specific pane fast across windows           |
-| `prefix + d`     | detach the session                            | end of day — agents keep running                   |
-| `prefix + [`     | enter scroll/copy mode (`q` to exit)          | read agent output above the viewport               |
-| `prefix + ?`     | show every tmux keybinding interactively      | self-help when you forget one                      |
+> **What is the "prefix"?** Tmux's modifier key. Default: **`Ctrl+b`** — press it, release, then press the next key. Check yours: `tmux show-options -g prefix`.
 
-`mt new`, `mt ls`, `mt rm`, `mt switch`, `mt show`, `mt bind` — run from any shell. The `prefix +` keys above pop them up in an overlay so they're reachable from inside an agent.
+The standard tmux keys (arrow nav, `prefix + s` for sessions, `prefix + w` for windows, `prefix + [` for scroll) all still work as you'd expect. Press `prefix + ?` for the full list.
 
 ### Switching repos from inside Claude (the daily flow)
 

@@ -408,7 +408,78 @@ EOF
   pass ".envrc content matches original ($(cat "$WT/.envrc"))"
 fi
 
-section "15. credentials.json is untouched (auth invariant §1.4)"
+section "15. mt prune removes dead worktrees in bulk"
+# create two worktrees in our acme-api fixture, kill one pane to make it dead
+MT_REPO="$FIXTURE_REPO" MT_BRANCH="prune-keep" "$MT" new --with claude >/dev/null 2>&1 &
+sleep 0.4; kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+MT_REPO="$FIXTURE_REPO" MT_BRANCH="prune-die"  "$MT" new --with claude >/dev/null 2>&1 &
+sleep 0.4; kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+
+# kill the second pane to mark it dead
+dead_pane=$(tmux list-panes -t mt-smoke:dashboard -F '#{pane_id} #{pane_title}' 2>/dev/null \
+  | awk '$2 == "acme-api:prune-die" {print $1}' || true)
+if [[ -n "$dead_pane" ]]; then
+  tmux kill-pane -t "$dead_pane" || true
+fi
+
+# prune --force should remove the dead one but leave the live one
+"$MT" prune --force >/dev/null 2>&1
+
+[[ ! -d "$FIXTURE_REPO/.worktrees/prune-die" ]] \
+  || fail "mt prune did not remove dead worktree"
+pass "mt prune removed the dead worktree"
+
+[[ -d "$FIXTURE_REPO/.worktrees/prune-keep" ]] \
+  || fail "mt prune incorrectly removed the live worktree"
+pass "mt prune left the live worktree intact"
+
+section "16. mt switch lists dead worktrees with [dead] marker and revives them"
+# kill the prune-keep pane to create a dead worktree to revive
+keep_pane=$(tmux list-panes -t mt-smoke:dashboard -F '#{pane_id} #{pane_title}' 2>/dev/null \
+  | awk '$2 == "acme-api:prune-keep" {print $1}' || true)
+if [[ -n "$keep_pane" ]]; then
+  tmux kill-pane -t "$keep_pane" || true
+fi
+
+# capture what mt switch shows fzf — use the show-stub
+SHOW_STUB="$TMP/stub-show-rev"
+mkdir -p "$SHOW_STUB"
+cat > "$SHOW_STUB/fzf" <<'EOF'
+#!/usr/bin/env bash
+cat > /tmp/mt-switch-input.$$
+exit 1
+EOF
+chmod +x "$SHOW_STUB/fzf"
+
+PATH="$SHOW_STUB:$PATH" "$MT" switch >/dev/null 2>&1 || true
+input_file=$(ls -t /tmp/mt-switch-input.* 2>/dev/null | head -1)
+if [[ -n "$input_file" && -s "$input_file" ]]; then
+  grep -qE 'acme-api:prune-keep.*\[dead\]' "$input_file" \
+    || fail "mt switch did not list acme-api:prune-keep with [dead] marker"
+  pass "mt switch lists dead worktree with [dead] marker"
+  rm -f "$input_file"
+fi
+
+# Now revive: stub fzf to pick the dead entry
+REV_STUB="$TMP/stub-revive"
+mkdir -p "$REV_STUB"
+cat > "$REV_STUB/fzf" <<'EOF'
+#!/usr/bin/env bash
+awk '/prune-keep/ && /\[dead\]/ { print; exit }'
+EOF
+chmod +x "$REV_STUB/fzf"
+
+PATH="$REV_STUB:$PATH" "$MT" switch >/dev/null 2>&1 &
+sleep 1
+kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+
+# the revived pane should now exist with the right title
+tmux list-panes -t mt-smoke:dashboard -F '#{pane_title}' 2>/dev/null \
+  | grep -qx "acme-api:prune-keep" \
+  || fail "mt switch did not revive the dead worktree as a new pane"
+pass "mt switch revived dead worktree → new pane acme-api:prune-keep"
+
+section "17. credentials.json is untouched (auth invariant §1.4)"
 
 section "13. credentials.json is untouched (auth invariant §1.4)"
 # we don't actually have ~/.claude/.credentials.json in CI, but we can verify

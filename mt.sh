@@ -206,29 +206,87 @@ cmd_switch() {
 
   command -v fzf >/dev/null 2>&1 || die "fzf not found; install: https://github.com/junegunn/fzf"
 
-  tmux has-session -t="$MT_TMUX_SESSION" 2>/dev/null \
-    || die "no $MT_TMUX_SESSION dashboard found; run 'mt new' first"
+  # Build a unified target list:
+  #   live  → title | live | pane_id      (selecting it: tmux select-pane)
+  #   dead  → title | dead | worktree_path  (selecting it: revive via mt new)
+  ensure_dashboard
+  local live_entries dead_entries
+  live_entries=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
+    -F '#{pane_title}|live|#{pane_id}' 2>/dev/null)
+  # dead = worktrees on disk with no matching live pane on this dashboard
+  dead_entries=$(cmd_ls 2>/dev/null \
+    | awk '$NF == "dead" { printf "%s|dead|%s\n", $1, $2 }')
 
-  # one row per pane: title | current command | pane_id (hidden key)
   local entries
-  entries=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
-    -F '#{pane_title}|#{pane_current_command}|#{pane_id}' 2>/dev/null)
-  [[ -n "$entries" ]] || die "no panes on $MT_TMUX_SESSION:$MT_TMUX_WINDOW"
+  entries=$(printf '%s\n%s\n' "$live_entries" "$dead_entries" | grep -v '^$' || true)
+  [[ -n "$entries" ]] || die "no panes or worktrees to switch to"
 
   local choice
   choice=$(printf '%s\n' "$entries" \
-    | awk -F'|' '{ printf "%-40s  %-10s  %s\n", $1, $2, $3 }' \
+    | awk -F'|' '{
+        if ($2 == "live") printf "%-40s  [live]  %s\n", $1, $3
+        else              printf "%-40s  [dead]  %s\n", $1, $3
+      }' \
     | fzf --prompt="switch> " --height=40% --with-nth=1,2 --delimiter='[[:space:]]+') \
     || exit 1
 
-  # last whitespace-delimited token is the pane_id (e.g. %42)
-  local pane_id
-  pane_id=$(printf '%s' "$choice" | awk '{print $NF}')
-  [[ -n "$pane_id" ]] || die "could not parse pane id from selection"
+  # last whitespace-delimited token is either pane_id (live) or worktree path (dead)
+  local key marker
+  key=$(printf '%s' "$choice" | awk '{print $NF}')
+  marker=$(printf '%s' "$choice" | awk '{print $(NF-1)}')
 
-  tmux select-pane -t "$pane_id"
-  $zoom && tmux resize-pane -t "$pane_id" -Z
-  attach_dashboard
+  if [[ "$marker" == "[live]" ]]; then
+    tmux select-pane -t "$key"
+    $zoom && tmux resize-pane -t "$key" -Z
+    attach_dashboard
+  else
+    # revive: $key is the worktree path, derive repo + branch and re-launch
+    local wt_path="$key"
+    local branch repo
+    branch=$(basename "$wt_path")
+    repo=$(dirname "$(dirname "$wt_path")")
+    MT_REPO="$repo" MT_BRANCH="$branch" cmd_new --with "$MT_DEFAULT_BACKEND"
+  fi
+}
+
+cmd_prune() {
+  local force=""
+  [[ "${1:-}" == "--force" ]] && force="--force"
+
+  local dead
+  dead=$(cmd_ls 2>/dev/null | awk '$NF == "dead"')
+  [[ -n "$dead" ]] || die "no dead worktrees to prune"
+
+  echo "Dead worktrees (no live pane on $MT_TMUX_SESSION:$MT_TMUX_WINDOW):"
+  echo "$dead" | awk '{ printf "  %-40s  %s\n", $1, $2 }'
+  echo ""
+  if [[ -z "$force" ]]; then
+    printf "Remove all of these (worktree + branch)? [y/N] " >&2
+    local ans; read -r ans
+    [[ "$ans" =~ ^[yY]$ ]] || die "aborted"
+  fi
+
+  local removed=0 skipped=0
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local title path repo branch full_branch
+    title=$(printf '%s' "$line" | awk '{print $1}')
+    path=$(printf '%s' "$line" | awk '{print $2}')
+    repo=$(dirname "$(dirname "$path")")
+    branch=$(basename "$path")
+    full_branch="$MT_BRANCH_PREFIX/$branch"
+
+    if git -C "$repo" worktree remove $force "$path" >/dev/null 2>&1; then
+      git -C "$repo" branch -D "$full_branch" >/dev/null 2>&1 || true
+      printf "  removed:  %s\n" "$title"
+      removed=$((removed + 1))
+    else
+      printf "  skipped:  %s  (dirty — use 'mt prune --force' to bypass)\n" "$title"
+      skipped=$((skipped + 1))
+    fi
+  done <<< "$dead"
+
+  printf "\n%d removed, %d skipped\n" "$removed" "$skipped"
 }
 
 cmd_new() {
@@ -278,7 +336,13 @@ cmd_new() {
   fi
 
   if [[ -d "$worktree_path" ]]; then
-    git -C "$repo" worktree list --porcelain | grep -q "^worktree $worktree_path$" \
+    # macOS /tmp resolves through a symlink to /private/tmp; git stores
+    # worktree paths in their canonical (resolved) form. Resolve both
+    # sides before comparing so revive-on-existing-worktree works cleanly.
+    local resolved; resolved=$(cd "$worktree_path" && pwd -P)
+    git -C "$repo" worktree list --porcelain \
+      | awk '/^worktree / {print $2}' \
+      | grep -qFx "$resolved" \
       || die "path exists: $worktree_path"
   else
     # If the parent repo uses git-crypt, plain `git worktree add` fails: the
@@ -419,7 +483,8 @@ usage:
   mt new [--with claude|ollama]    create a worktree + launch agent in a pane
   mt ls              list worktrees: title, path, backend, state (live|dead)
   mt rm [--force]    pick a worktree, remove it (worktree, branch, pane all)
-  mt switch [-z]     fzf jump to any pane by repo:branch (-z to zoom)
+  mt switch [-z]     fzf jump to any pane (live or dead — dead ones revive)
+  mt prune [--force] remove all dead worktrees in one shot (interactive confirm)
   mt bind            install tmux keybindings (prefix+g/G/N/R) for in-agent use
   mt --help
 
@@ -430,11 +495,25 @@ EOF
 
 main() {
   load_config
+  # When invoked from inside tmux (e.g. via the prefix+g popup binding),
+  # operate on the *calling* session, not whatever the config says. This
+  # makes a single binding work across multiple mt sessions (mt, mt-dev,
+  # ...) without the user having to rebind per session.
+  #
+  # Cold boot from a regular shell: $TMUX is unset, so config wins.
+  if [[ -n "${TMUX:-}" ]]; then
+    local cur_sess cur_win
+    cur_sess=$(tmux display-message -p '#{session_name}' 2>/dev/null || true)
+    cur_win=$(tmux display-message -p '#{window_name}' 2>/dev/null || true)
+    [[ -n "$cur_sess" ]] && MT_TMUX_SESSION="$cur_sess"
+    [[ -n "$cur_win" ]] && MT_TMUX_WINDOW="$cur_win"
+  fi
   case "${1:-show}" in
     new)       shift; cmd_new "$@";;
     ls)        cmd_ls;;
     rm)        shift; cmd_rm "$@";;
     switch|sw) shift; cmd_switch "$@";;
+    prune)     shift; cmd_prune "$@";;
     bind)      cmd_bind;;
     show)      cmd_show;;
     -h|--help) usage;;
