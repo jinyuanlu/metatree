@@ -56,15 +56,34 @@ jobs:
           sed -i '' 's|MT="$MT_DIR/mt.sh"|MT="${MT:-$MT_DIR/mt.sh}"|' /tmp/smoke.sh
           MT="$PWD/bin/mt-go" bash /tmp/smoke.sh
 
-      - name: auth invariant — no credential refs in source
+      - name: auth invariant — no credential refs in production source
         # Central promise of mt: never read Anthropic credentials. This step
-        # fails the build if any non-comment .go line mentions ANTHROPIC_ or
-        # credentials.json. Comment-only mentions (// ...) are allowed.
+        # fails the build if any non-comment .go line in production code
+        # (cmd/, internal/) mentions ANTHROPIC_ or credentials.json.
+        #
+        # tests/ is exempt: TestAuthInvariantNoCredentialRefs in
+        # tests/integration_test.go has to mention these strings literally to
+        # assert they're absent in production. Same exemption the test itself
+        # applies internally.
+        #
+        # Comment lines (// ...) are also allowed in production code so we
+        # can document what we DON'T do. The filter strips the `file:line:`
+        # prefix grep -rn produces, then checks whether the remaining content
+        # starts with `//`.
         run: |
-          if grep -rE '(ANTHROPIC_|credentials\.json)' --include='*.go' . \
-             | grep -vE '^[^:]+:[[:space:]]*//' >/dev/null; then
-            echo "ERROR: non-comment reference to credentials.json or ANTHROPIC_ in Go source"
-            grep -rnE '(ANTHROPIC_|credentials\.json)' --include='*.go' . \
-              | grep -vE '^[^:]+:[[:space:]]*//'
+          set +e  # grep returns 1 on no-match — that's success here
+          matches=$(grep -rnE '(ANTHROPIC_|credentials\.json)' \
+            --include='*.go' cmd/ internal/ \
+            | awk -F: '{
+                # $1=file, $2=line, $3+=content. Print only lines whose content
+                # is not a // or /* comment.
+                content = $3
+                for (i = 4; i <= NF; i++) content = content ":" $i
+                sub(/^[ \t]+/, "", content)
+                if (content !~ /^\/\//  &&  content !~ /^\*/) print
+              }')
+          if [ -n "$matches" ]; then
+            echo "ERROR: non-comment reference to credentials.json or ANTHROPIC_ in production Go source"
+            echo "$matches"
             exit 1
           fi
