@@ -400,22 +400,17 @@ func TestAliasExpansionInSubsequentPane(t *testing.T) {
 				t.Logf("[mt new %s] stderr:\n%s", branch, s)
 			}
 		}()
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start mt new %s: %v", branch, err)
+		// Run mt to completion (no Kill). It exits with rc=1 quickly when
+		// tmux attach fails (no TTY in tests), but that's *after* the
+		// MarkPane step that managedCount depends on. Killing on
+		// "worktree dir lands" raced past MarkPane on slower runners and
+		// silently regressed pane #2 to path 1. cmd.Wait() also joins the
+		// stderr-copy goroutine — required for the deferred reader.
+		if err := cmd.Run(); err == nil {
+			// mt is expected to exit non-zero (tmux attach fails); a
+			// rare zero return isn't itself a failure for this test.
+			_ = err
 		}
-		// wait until the worktree dir lands
-		for i := 0; i < 50; i++ {
-			if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", branch)); err == nil {
-				break
-			}
-			mustSleep(t, 100)
-		}
-		_ = cmd.Process.Kill()
-		// cmd.Wait (not Process.Wait) so the stderr-copy goroutine that
-		// exec.Cmd starts when we assign &stderr finishes before the
-		// deferred reader runs. Process.Wait alone leaves a -race-visible
-		// data race on the buffer.
-		_ = cmd.Wait()
 	}
 
 	// Override claude_cmd to the bare name `claude` so the alias has
@@ -494,17 +489,10 @@ func TestUnknownShellWarningEmitted(t *testing.T) {
 		"MT_BRANCH=first",
 		"SHELL=/usr/local/bin/nu",
 	)
-	if err := cmd1.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "first")); err == nil {
-			break
-		}
-		mustSleep(t, 100)
-	}
-	_ = cmd1.Process.Kill()
-	_ = cmd1.Wait() // join I/O copy goroutines too — see runMtNew above
+	// Run to completion (not Kill-mid-flight). MarkPane must finish before
+	// cmd2 fires, otherwise managedCount==0 and cmd2 falls back to path 1
+	// (no split-window, no warning). See runMtNew above.
+	_ = cmd1.Run()
 
 	// Second pane goes through path 2 — the warning should fire here.
 	cmd2 := exec.Command(f.mtBin, "new", "--with", "claude")
@@ -518,17 +506,7 @@ func TestUnknownShellWarningEmitted(t *testing.T) {
 	)
 	var stderr bytes.Buffer
 	cmd2.Stderr = &stderr
-	if err := cmd2.Start(); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	for i := 0; i < 50; i++ {
-		if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "second")); err == nil {
-			break
-		}
-		mustSleep(t, 100)
-	}
-	_ = cmd2.Process.Kill()
-	_ = cmd2.Wait() // join the &stderr copy goroutine before reading it
+	_ = cmd2.Run() // run to completion (Run = Start + Wait)
 
 	out := stderr.String()
 	if !strings.Contains(out, "$SHELL=/usr/local/bin/nu not recognized") {
