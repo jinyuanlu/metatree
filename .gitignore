@@ -5,6 +5,9 @@
 /bin/mt-go
 /dist/
 
+# mt runtime worktrees
+.worktrees/
+
 # direnv cache
 .direnv/
 
