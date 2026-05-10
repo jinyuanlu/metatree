@@ -433,51 +433,54 @@ pass "mt prune removed the dead worktree"
   || fail "mt prune incorrectly removed the live worktree"
 pass "mt prune left the live worktree intact"
 
-section "16. mt switch lists dead worktrees with [dead] marker and revives them"
-# kill the prune-keep pane to create a dead worktree to revive
-keep_pane=$(tmux list-panes -t mt-smoke:dashboard -F '#{pane_id} #{pane_title}' 2>/dev/null \
+section "16. mt switch popup excludes dead worktrees (live + create only)"
+# kill the prune-keep pane so it becomes a dead worktree
+keep_pane=$(tmux list-panes -t mt-smoke:dashboard -F '#{pane_id} #{@mt-managed}' 2>/dev/null \
   | awk '$2 == "acme-api:prune-keep" {print $1}' || true)
 if [[ -n "$keep_pane" ]]; then
   tmux kill-pane -t "$keep_pane" || true
 fi
 
-# capture what mt switch shows fzf — use the show-stub
+# capture what mt switch shows fzf
 SHOW_STUB="$TMP/stub-show-rev"
 mkdir -p "$SHOW_STUB"
-cat > "$SHOW_STUB/fzf" <<'EOF'
+cat > "$SHOW_STUB/fzf" <<'STUB'
 #!/usr/bin/env bash
-cat > /tmp/mt-switch-input.$$
+cat > "$MT_TEST_SWITCH_CAPTURE"
 exit 1
-EOF
+STUB
 chmod +x "$SHOW_STUB/fzf"
 
-PATH="$SHOW_STUB:$PATH" "$MT" switch >/dev/null 2>&1 || true
-input_file=$(ls -t /tmp/mt-switch-input.* 2>/dev/null | head -1)
-if [[ -n "$input_file" && -s "$input_file" ]]; then
-  grep -qE 'acme-api:prune-keep.*\[dead\]' "$input_file" \
-    || fail "mt switch did not list acme-api:prune-keep with [dead] marker"
-  pass "mt switch lists dead worktree with [dead] marker"
-  rm -f "$input_file"
+CAP="$TMP/switch-input"
+PATH="$SHOW_STUB:$PATH" MT_TEST_SWITCH_CAPTURE="$CAP" "$MT" switch >/dev/null 2>&1 || true
+
+[[ -s "$CAP" ]] || fail "mt switch produced no fzf input"
+
+# must NOT list any [dead] entries
+if grep -qF '[dead]' "$CAP"; then
+  fail "mt switch popup still shows [dead] entries: $(cat "$CAP")"
 fi
+pass "mt switch popup contains zero [dead] entries"
 
-# Now revive: stub fzf to pick the dead entry
-REV_STUB="$TMP/stub-revive"
-mkdir -p "$REV_STUB"
-cat > "$REV_STUB/fzf" <<'EOF'
-#!/usr/bin/env bash
-awk '/prune-keep/ && /\[dead\]/ { print; exit }'
-EOF
-chmod +x "$REV_STUB/fzf"
+# must include the always-on "+ Create new worktree" entry
+grep -qF '[new ]' "$CAP" \
+  || fail "mt switch missing the '+ Create new worktree' entry"
+pass "mt switch popup includes the [new] create-worktree entry"
 
-PATH="$REV_STUB:$PATH" "$MT" switch >/dev/null 2>&1 &
-sleep 1
-kill $! 2>/dev/null || true; wait $! 2>/dev/null || true
+# the dead prune-keep worktree must NOT appear as a switch target
+if grep -qE 'acme-api:prune-keep' "$CAP"; then
+  fail "dead worktree acme-api:prune-keep leaked into switch picker: $(cat "$CAP")"
+fi
+pass "dead worktree acme-api:prune-keep is hidden from switch picker"
 
-# the revived pane should now exist with the right title
-tmux list-panes -t mt-smoke:dashboard -F '#{pane_title}' 2>/dev/null \
-  | grep -qx "acme-api:prune-keep" \
-  || fail "mt switch did not revive the dead worktree as a new pane"
-pass "mt switch revived dead worktree → new pane acme-api:prune-keep"
+# but mt ls must still show it (for visibility / pruneability).
+# Capture to variable instead of piping directly: grep -q closes stdin
+# on first match, which under pipefail surfaces mt's SIGPIPE as a fail
+# even though the match succeeded.
+ls_out=$("$MT" ls 2>/dev/null || true)
+printf '%s\n' "$ls_out" | grep -qF 'acme-api:prune-keep' \
+  || fail "mt ls dropped acme-api:prune-keep — it should still be listed"
+pass "mt ls still lists the dead worktree (for prune)"
 
 section "17. mt logs every invocation; mt diagnose prints state cleanly"
 TEST_LOG="$TMP/mt.log"

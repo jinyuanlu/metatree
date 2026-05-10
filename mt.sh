@@ -137,6 +137,46 @@ pane_title() {
   printf '%s:%s' "$repo_name" "$branch"
 }
 
+# All worktrees git knows about, across all configured repos. Catches both
+# mt's convention (<repo>/.worktrees/<branch>) and Claude Code's native
+# (<repo>/.claude/worktrees/<task>) and any user-created worktrees. Skips
+# the main worktree (the repo itself).
+#
+# Output format: <resolved_repo_path>\t<worktree_path>\n
+discover_worktrees() {
+  local repo
+  for repo in $(discover_repos); do
+    local resolved
+    resolved=$(cd "$repo" 2>/dev/null && pwd -P) || continue
+    # `|| true` so a single repo failure (e.g. corrupted .git, permission
+    # error) doesn't kill the whole listing under set -e/pipefail.
+    { git -C "$repo" worktree list --porcelain 2>/dev/null || true; } \
+      | awk -v r="$resolved" '
+          /^worktree / { wt = $2; next }
+          /^HEAD / && wt != "" {
+            if (wt != r) print r "\t" wt
+            wt = ""
+          }
+          /^$/ { wt = "" }
+        ' || true
+  done
+}
+
+# Find the parent repo's working tree path for any worktree. Robust across
+# mt-style and claude-style worktree paths (won't break on `.claude/worktrees/`
+# where `dirname; dirname` gives the wrong answer).
+parent_repo_of() {
+  local wt="$1" gd
+  gd=$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null) || return 1
+  # git-common-dir is `<repo>/.git`; dirname gives the repo working dir
+  if [[ "$gd" == /* ]]; then
+    dirname "$gd"
+  else
+    # relative path — resolve against worktree's path
+    (cd "$wt" && cd "$(dirname "$gd")" && pwd -P)
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # tmux primitives
 # ---------------------------------------------------------------------------
@@ -334,46 +374,50 @@ cmd_switch() {
   #   live  → title | live | pane_id      (selecting it: tmux select-pane)
   #   dead  → title | dead | worktree_path  (selecting it: revive via mt new)
   ensure_dashboard
-  local live_entries dead_entries
-  # mt-managed panes only — skip bare shells and any external panes the user
-  # may have split off. Display the @mt-managed value (stable; not OSC-clobbered).
+  local live_entries
+  # mt-managed live panes only. Dead worktrees deliberately excluded from
+  # the picker — switch is for navigating between active work, not reviving
+  # graveyards. Use `mt ls` to see all worktrees, `mt prune` to clean dead.
   live_entries=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
     -F '#{@mt-managed}|live|#{pane_id}' 2>/dev/null \
     | grep -v '^|')
-  # dead = worktrees on disk with no matching live pane on this dashboard
-  dead_entries=$(cmd_ls 2>/dev/null \
-    | awk '$NF == "dead" { printf "%s|dead|%s\n", $1, $2 }')
+
+  # "+ Create new worktree" — keeps the popup non-empty even when there
+  # are no live panes yet, and gives one-keystroke access to mt new from
+  # inside an agent.
+  local create_entry="+ Create new worktree...|new|<NEW>"
 
   local entries
-  entries=$(printf '%s\n%s\n' "$live_entries" "$dead_entries" | grep -v '^$' || true)
-  [[ -n "$entries" ]] || die "no panes or worktrees to switch to"
+  entries=$(printf '%s\n%s\n' "$live_entries" "$create_entry" | grep -v '^$' || true)
 
   local choice
   choice=$(printf '%s\n' "$entries" \
     | awk -F'|' '{
-        if ($2 == "live") printf "%-40s  [live]  %s\n", $1, $3
-        else              printf "%-40s  [dead]  %s\n", $1, $3
+        if ($2 == "live")    printf "%-40s  [live]  %s\n", $1, $3
+        else if ($2 == "new") printf "%-40s  [new ]  %s\n", $1, $3
       }' \
     | fzf --prompt="switch> " --height=40% --with-nth=1,2 --delimiter='[[:space:]]+') \
     || exit 1
 
-  # last whitespace-delimited token is either pane_id (live) or worktree path (dead)
+  # last whitespace-delimited token is either pane_id (live) or the <NEW> sentinel.
   local key marker
   key=$(printf '%s' "$choice" | awk '{print $NF}')
   marker=$(printf '%s' "$choice" | awk '{print $(NF-1)}')
 
-  if [[ "$marker" == "[live]" ]]; then
-    tmux select-pane -t "$key"
-    $zoom && tmux resize-pane -t "$key" -Z
-    attach_dashboard
-  else
-    # revive: $key is the worktree path, derive repo + branch and re-launch
-    local wt_path="$key"
-    local branch repo
-    branch=$(basename "$wt_path")
-    repo=$(dirname "$(dirname "$wt_path")")
-    MT_REPO="$repo" MT_BRANCH="$branch" cmd_new --with "$MT_DEFAULT_BACKEND"
-  fi
+  case "$marker" in
+    '[live]')
+      tmux select-pane -t "$key"
+      $zoom && tmux resize-pane -t "$key" -Z
+      attach_dashboard
+      ;;
+    '[new'*)
+      # "+ Create new worktree" — fall through to interactive cmd_new
+      cmd_new --with "$MT_DEFAULT_BACKEND"
+      ;;
+    *)
+      die "unrecognized switch entry marker: $marker"
+      ;;
+  esac
 }
 
 cmd_prune() {
@@ -396,15 +440,22 @@ cmd_prune() {
   local removed=0 skipped=0
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    local title path repo branch full_branch
+    local title path repo branch full_branch try_branch
     title=$(printf '%s' "$line" | awk '{print $1}')
     path=$(printf '%s' "$line" | awk '{print $2}')
-    repo=$(dirname "$(dirname "$path")")
+    repo=$(parent_repo_of "$path") || { printf "  skipped:  %s  (no parent repo)\n" "$title"; skipped=$((skipped+1)); continue; }
     branch=$(basename "$path")
     full_branch="$MT_BRANCH_PREFIX/$branch"
 
     if git -C "$repo" worktree remove $force "$path" >/dev/null 2>&1; then
-      git -C "$repo" branch -D "$full_branch" >/dev/null 2>&1 || true
+      for try_branch in "$full_branch" "$branch"; do
+        if git -C "$repo" rev-parse --verify "$try_branch" >/dev/null 2>&1; then
+          if ! git -C "$repo" rev-parse "$try_branch@{upstream}" >/dev/null 2>&1; then
+            git -C "$repo" branch -D "$try_branch" >/dev/null 2>&1 || true
+          fi
+          break
+        fi
+      done
       printf "  removed:  %s\n" "$title"
       removed=$((removed + 1))
     else
@@ -432,8 +483,21 @@ cmd_new() {
 
   local repo
   if [[ -n "${MT_REPO:-}" ]]; then
-    repo=$(printf '%s' "$repos" | grep -Fx "$MT_REPO" | head -1)
-    [[ -n "$repo" ]] || die "MT_REPO not in discovered repos: $MT_REPO"
+    # Path may have come from `parent_repo_of` (resolved through symlinks,
+    # e.g. /private/tmp/...) while discover_repos returns config-form paths
+    # (/tmp/...). Compare resolved forms to match across symlink layers.
+    local mt_repo_resolved candidate
+    mt_repo_resolved=$(cd "$MT_REPO" 2>/dev/null && pwd -P) || die "MT_REPO not accessible: $MT_REPO"
+    while IFS= read -r candidate; do
+      [[ -z "$candidate" ]] && continue
+      local c_resolved
+      c_resolved=$(cd "$candidate" 2>/dev/null && pwd -P) || continue
+      if [[ "$c_resolved" == "$mt_repo_resolved" ]]; then
+        repo="$candidate"
+        break
+      fi
+    done <<< "$repos"
+    [[ -n "${repo:-}" ]] || die "MT_REPO not in discovered repos: $MT_REPO"
   else
     repo=$(printf '%s' "$repos" | fzf --prompt="repo> " --height=40%) || exit 1
   fi
@@ -544,27 +608,24 @@ cmd_new() {
 
 cmd_ls() {
   local repo wt branch title pane_id state backend cmd
-  for repo in $(discover_repos); do
-    [[ -d "$repo/$MT_WORKTREE_SUBDIR" ]] || continue
-    for wt in "$repo/$MT_WORKTREE_SUBDIR"/*; do
-      [[ -d "$wt" ]] || continue
-      branch=$(basename "$wt")
-      title=$(pane_title "$repo" "$branch")
-      # find_pane uses @mt-managed (stable across OSC title changes by agents)
-      pane_id=$(find_pane "$title" || true)
-      state="dead"; backend="-"
-      if [[ -n "$pane_id" ]]; then
-        state="live"
-        cmd=$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null || echo "?")
-        case "$cmd" in
-          claude*) backend="claude";;
-          ollama*) backend="ollama";;
-          *)       backend="$cmd";;
-        esac
-      fi
-      printf "%-40s  %-50s  %-8s  %s\n" "$title" "$wt" "$backend" "$state"
-    done
-  done
+  while IFS=$'\t' read -r repo wt; do
+    [[ -n "$repo" && -n "$wt" ]] || continue
+    branch=$(basename "$wt")
+    title=$(pane_title "$repo" "$branch")
+    # find_pane uses @mt-managed (stable across OSC title changes by agents)
+    pane_id=$(find_pane "$title" || true)
+    state="dead"; backend="-"
+    if [[ -n "$pane_id" ]]; then
+      state="live"
+      cmd=$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null || echo "?")
+      case "$cmd" in
+        claude*) backend="claude";;
+        ollama*) backend="ollama";;
+        *)       backend="$cmd";;
+      esac
+    fi
+    printf "%-40s  %-50s  %-8s  %s\n" "$title" "$wt" "$backend" "$state"
+  done < <(discover_worktrees)
 }
 
 cmd_rm() {
@@ -586,16 +647,26 @@ cmd_rm() {
   local title path repo branch full_branch
   title=$(printf '%s' "$choice" | awk '{print $1}')
   path=$(printf '%s' "$choice" | awk '{print $2}')
-  repo=$(dirname "$(dirname "$path")")
+  # Robust: use git to find the parent repo, not dirname-twice (which
+  # breaks for claude-style worktrees at `.claude/worktrees/<name>`).
+  repo=$(parent_repo_of "$path") || die "could not resolve parent repo for $path"
   branch=$(basename "$path")
   full_branch="$MT_BRANCH_PREFIX/$branch"
 
   if ! git -C "$repo" worktree remove $force "$path" 2>&1; then
     die "worktree has uncommitted changes; use 'mt rm --force' to bypass"
   fi
-  if ! git -C "$repo" rev-parse "$full_branch@{upstream}" >/dev/null 2>&1; then
-    git -C "$repo" branch -D "$full_branch" 2>/dev/null || true
-  fi
+  # Try the prefixed branch first (mt's convention). If that doesn't exist,
+  # try the bare branch name (claude/external worktrees). Either way only
+  # delete if no upstream is set, to avoid losing remote-tracked branches.
+  for try_branch in "$full_branch" "$branch"; do
+    if git -C "$repo" rev-parse --verify "$try_branch" >/dev/null 2>&1; then
+      if ! git -C "$repo" rev-parse "$try_branch@{upstream}" >/dev/null 2>&1; then
+        git -C "$repo" branch -D "$try_branch" >/dev/null 2>&1 || true
+      fi
+      break
+    fi
+  done
   local pane_id; pane_id=$(find_pane "$title" || true)
   if [[ -n "$pane_id" ]]; then
     tmux kill-pane -t "$pane_id"
