@@ -92,14 +92,39 @@ auto_direnv_allow = "true"
 
 ## Tmux is the entire UI
 
-`mt` adds zero UI primitives. Everything you see and do, you do through tmux:
+`mt` adds zero UI primitives. The dashboard window, the panes, the switching — all native tmux. If a feature can't be expressed as `tmux split-window` or `tmux select-layout tiled`, `mt` doesn't do it.
 
-- `prefix + arrow` — switch panes
-- `prefix + z` — zoom one pane to fullscreen, again to unzoom
-- `prefix + space` — re-tile (rarely needed; `mt` re-tiles on every change)
-- `prefix + d` — detach. `tmux attach -t mt` (or just `mt`) reattaches.
+### Daily cheat sheet
 
-If you can't express it as a tmux command, `mt` doesn't do it.
+> **What is the "prefix"?** Tmux's modifier key. Default: **`Ctrl+b`**. You press it, release, then press the next key — like a two-stage chord. Check yours with `tmux show-options -g prefix`. (Many people remap it to `Ctrl+a` in `~/.tmux.conf`.)
+
+These are the shortcuts you'll actually use every day with `mt`:
+
+| Keys             | What it does                                  | When you reach for it                              |
+| ---------------- | --------------------------------------------- | -------------------------------------------------- |
+| `mt`             | attach to (or create) the dashboard           | first thing every morning                          |
+| `prefix + ←/→/↑/↓` | switch focus between tiled panes              | jump between repos on the dashboard                |
+| `prefix + z`     | zoom one pane to fullscreen / toggle back     | focus one agent, then return to the overview       |
+| `prefix + s`     | **session chooser** — the "orchestration board" | see all `mt` sessions side-by-side, pick one       |
+| `prefix + w`     | window/pane chooser with live previews        | find a specific pane fast across windows           |
+| `prefix + d`     | detach the session                            | end of day, leaving the room — agents keep running |
+| `prefix + [`     | enter scroll/copy mode (`q` to exit)          | read agent output above the visible viewport       |
+| `prefix + ?`     | show every tmux keybinding interactively      | self-help when you forget one                      |
+| `prefix + space` | cycle layout (rarely needed — mt re-tiles)    | only after manual pane resizing                    |
+
+`mt new`, `mt ls`, `mt rm`, `mt show` — these are mt's commands and run from any shell, not from tmux's command prompt.
+
+The "orchestration board" Conductor-style users ask about *is* `prefix + s` (sessions) plus `prefix + w` (windows). Native tmux, no Electron, no daemon.
+
+### Detach and resume
+
+```sh
+prefix + d           # detach. agents keep running in the background.
+mt                   # reattach (any new terminal, any time later)
+tmux attach -t mt    # equivalent — useful when mt isn't on PATH yet
+```
+
+New to tmux entirely? `man tmux` is dense but complete. The first 30 minutes of any tmux tutorial covers everything `mt` needs.
 
 ## Why not [other tool]
 
