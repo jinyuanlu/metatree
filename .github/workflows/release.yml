@@ -1,11 +1,22 @@
 # release.yml — fires on v* tags. Builds release binaries via goreleaser
 # and publishes them to GitHub Releases. install.sh fetches from there.
+#
+# workflow_dispatch is also accepted so auto-tag.yml can trigger this
+# workflow after pushing a tag (a tag pushed by another workflow's
+# GITHUB_TOKEN does not by itself trigger a `push` workflow — that's a
+# documented GH Actions safeguard against recursive workflow chains).
 
 name: release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v1.0.1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,6 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: actions/setup-go@v5
         with:

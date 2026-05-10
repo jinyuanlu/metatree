@@ -411,7 +411,11 @@ func TestAliasExpansionInSubsequentPane(t *testing.T) {
 			mustSleep(t, 100)
 		}
 		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+		// cmd.Wait (not Process.Wait) so the stderr-copy goroutine that
+		// exec.Cmd starts when we assign &stderr finishes before the
+		// deferred reader runs. Process.Wait alone leaves a -race-visible
+		// data race on the buffer.
+		_ = cmd.Wait()
 	}
 
 	// Override claude_cmd to the bare name `claude` so the alias has
@@ -500,7 +504,7 @@ func TestUnknownShellWarningEmitted(t *testing.T) {
 		mustSleep(t, 100)
 	}
 	_ = cmd1.Process.Kill()
-	_, _ = cmd1.Process.Wait()
+	_ = cmd1.Wait() // join I/O copy goroutines too — see runMtNew above
 
 	// Second pane goes through path 2 — the warning should fire here.
 	cmd2 := exec.Command(f.mtBin, "new", "--with", "claude")
@@ -524,7 +528,7 @@ func TestUnknownShellWarningEmitted(t *testing.T) {
 		mustSleep(t, 100)
 	}
 	_ = cmd2.Process.Kill()
-	_, _ = cmd2.Process.Wait()
+	_ = cmd2.Wait() // join the &stderr copy goroutine before reading it
 
 	out := stderr.String()
 	if !strings.Contains(out, "$SHELL=/usr/local/bin/nu not recognized") {

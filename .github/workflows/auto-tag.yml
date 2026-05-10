@@ -24,7 +24,8 @@ on:
     branches: [master]
 
 permissions:
-  contents: write
+  contents: write   # push tags
+  actions: write    # dispatch release.yml via `gh workflow run`
 
 jobs:
   tag:
@@ -105,4 +106,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$new" -m "auto-release: $bump bump from $latest"
           git push origin "$new"
-          echo "pushed $new — release.yml will publish binaries"
+          echo "pushed $new"
+
+          # GH Actions safeguard: a tag pushed via the default GITHUB_TOKEN
+          # does not by itself trigger another workflow's `on: push: tags`
+          # event. Dispatch release.yml explicitly so the binaries land.
+          gh workflow run release.yml --ref "$new" -f tag="$new"
+          echo "dispatched release.yml for $new"
