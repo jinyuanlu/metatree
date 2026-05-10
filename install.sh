@@ -49,7 +49,12 @@ mkdir -p "$INSTALL_DIR"
 tar -xz -C "$INSTALL_DIR" -f "$TMP/$TARBALL" mt
 chmod +x "$INSTALL_DIR/mt"
 
-echo "installed: $INSTALL_DIR/mt"
+# Print the build identity from the freshly-installed binary. Anyone
+# triaging "is the fix in?" can paste this line into a bug report and
+# we can map the commit SHA back to a PR. Falls back gracefully if
+# --version is missing (older binaries).
+identity="$("$INSTALL_DIR/mt" --version 2>/dev/null || echo "$INSTALL_DIR/mt (version unknown)")"
+echo "installed: $identity"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) echo "PATH ok — try: mt --help" ;;
   *) echo "add to your shell rc:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;

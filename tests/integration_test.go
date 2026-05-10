@@ -8,15 +8,17 @@
 //
 // Run via:  go test -race ./tests/...
 //
-// Skipped automatically when tmux/git/mt aren't available on PATH or when
-// the build hasn't produced ./bin/mt-go yet.
+// TestMain compiles the mt binary fresh on every `go test` invocation,
+// so a stale `bin/mt-go` cannot silently produce ghost-failures (or
+// ghost-passes) by running an out-of-date build against current tests.
+// We saw this exact failure mode once and the next mistake of that
+// shape gets caught here, not via "rebuild and retry."
 package tests
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,7 +26,33 @@ import (
 	"testing"
 )
 
-const binRel = "../bin/mt-go"
+// testMtBin is the absolute path to a freshly-built mt binary, set by
+// TestMain. Tests reference this instead of any in-tree path so they
+// can never run against a stale build.
+var testMtBin string
+
+func TestMain(m *testing.M) {
+	if _, err := exec.LookPath("go"); err != nil {
+		fmt.Fprintln(os.Stderr, "tests: go toolchain required to build mt fresh; skipping")
+		os.Exit(0)
+	}
+	tmp, err := os.MkdirTemp("", "mt-itest-bin-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "tests: mkdir tmp:", err)
+		os.Exit(2)
+	}
+	defer os.RemoveAll(tmp)
+	bin := filepath.Join(tmp, "mt")
+	build := exec.Command("go", "build", "-o", bin, "../cmd/mt")
+	build.Stderr = os.Stderr
+	build.Stdout = os.Stderr
+	if err := build.Run(); err != nil {
+		fmt.Fprintln(os.Stderr, "tests: go build mt failed:", err)
+		os.Exit(2)
+	}
+	testMtBin = bin
+	os.Exit(m.Run())
+}
 
 // fixture holds the per-test scratch state: tmpdir, tmux socket dir, and
 // a ready-to-use mt config file. Cleanup kills the tmux server.
@@ -46,13 +74,13 @@ func setup(t *testing.T) *fixture {
 		t.Skip("git not installed; skipping integration test")
 	}
 
-	mtBin, err := filepath.Abs(binRel)
-	if err != nil {
-		t.Fatalf("abs %s: %v", binRel, err)
+	// TestMain builds mt fresh into testMtBin on every `go test` run, so
+	// the binary under test always matches the source tree. No stale-build
+	// foot-gun.
+	if testMtBin == "" {
+		t.Fatal("testMtBin unset; TestMain didn't build the mt binary")
 	}
-	if _, err := os.Stat(mtBin); errors.Is(err, fs.ErrNotExist) {
-		t.Skipf("%s not built; run `go build -o ./bin/mt-go ./cmd/mt` first", mtBin)
-	}
+	mtBin := testMtBin
 
 	// Short path so macOS UDS limit (~104) doesn't bite. mktemp under /tmp.
 	tmp, err := os.MkdirTemp("/tmp", "mt-itest-")

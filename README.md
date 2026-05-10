@@ -25,7 +25,7 @@ The pain is the next morning, when you can't remember which of your 11 tmux wind
 curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
 ```
 
-Installs the Go binary to `~/.local/bin/mt`. The installer is short, audit-friendly bash that fetches the right prebuilt binary for your OS+arch from GitHub Releases and verifies its checksum.
+Installs the Go binary to `~/.local/bin/mt`. The installer is short, audit-friendly bash that fetches the right prebuilt binary for your OS+arch from GitHub Releases and verifies its checksum. The last line it prints (`installed: mt vX.Y.Z (commit …, built …)`) is the build identity — paste it into any bug report so we can map back to a specific commit. Re-check at any time with `mt --version`.
 
 Power users can build from source instead:
 

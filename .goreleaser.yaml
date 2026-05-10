@@ -21,7 +21,10 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      - -s -w -X main.version={{.Version}}
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.FullCommit}}
+      - -X main.date={{.CommitDate}}
 
 archives:
   - name_template: "mt-{{.Os}}-{{.Arch}}"

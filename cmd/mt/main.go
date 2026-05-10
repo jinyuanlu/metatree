@@ -14,11 +14,31 @@ import (
 	"github.com/jinyuanlu/metatree/internal/mtlog"
 )
 
-// version is set by goreleaser via -ldflags '-X main.version=<tag>'.
-var version = "dev"
+// version, commit, and date are stamped at build time via -ldflags. See
+// .goreleaser.yaml (release builds) and Justfile / .github/workflows/ci.yml
+// (local + CI builds). `dev` defaults are visible if any build path
+// forgets to inject them — which is itself a useful smoke signal.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
 
 func main() {
 	command.Version = version
+	command.Commit = commit
+	command.BuildDate = date
+
+	// Fast-path: --version / -v / version. Print the build identity and
+	// exit before touching config or tmux. Keeps the version readable
+	// even when config is broken.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--version", "-v", "version":
+			command.PrintVersion(os.Stdout)
+			os.Exit(0)
+		}
+	}
 
 	cfg, err := config.Load()
 	if err != nil {

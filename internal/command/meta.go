@@ -2,6 +2,7 @@ package command
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,9 +13,30 @@ import (
 	"github.com/jinyuanlu/metatree/internal/tmuxio"
 )
 
-// Version is set at build time via -ldflags '-X main.version=...'.
-// Wire it through main.go.
-var Version = "dev"
+// Version, Commit, and BuildDate are set at build time via -ldflags. Wire
+// them through main.go. They surface via `mt --version`, `mt diagnose`,
+// and (after install) the install.sh confirmation line — so a user can
+// always trace their binary to a specific commit.
+var (
+	Version   = "dev"
+	Commit    = "none"
+	BuildDate = "unknown"
+)
+
+// PrintVersion writes a single-line build identity. Format is stable —
+// install.sh and any future scripts can grep `mt v` to extract the tag.
+func PrintVersion(w io.Writer) {
+	fmt.Fprintf(w, "mt %s (commit %s, built %s)\n", Version, shortCommit(Commit), BuildDate)
+}
+
+// shortCommit truncates a 40-char SHA to 7. Leaves anything else
+// (including "none" and pre-shortened values) untouched.
+func shortCommit(c string) string {
+	if len(c) >= 40 {
+		return c[:7]
+	}
+	return c
+}
 
 // usageText is the canonical help string. Same order and shape as the
 // bash `usage()` block in mt.sh (preserved for muscle memory).
@@ -30,6 +52,7 @@ usage:
   mt prune [--force] remove all dead worktrees in one shot (interactive confirm)
   mt bind            install tmux keybindings (prefix+g/G/N/R) for in-agent use
   mt diagnose        print state for debugging (versions, config, bindings, log)
+  mt --version       print build identity (tag, commit, build date)
   mt --help
 
 config: ~/.config/mt/config.toml — empty file is valid (all fields default)
@@ -96,7 +119,8 @@ func RunDiagnose(env *Env, args []string) error {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "VERSIONS")
 	fmt.Fprintf(out, "  mt path:    %s\n", mtPath)
-	fmt.Fprintf(out, "  mt version: %s\n", Version)
+	fmt.Fprintf(out, "  mt version: %s (commit %s, built %s)\n",
+		Version, shortCommit(Commit), BuildDate)
 	fmt.Fprintf(out, "  tmux:       %s\n", versionLine("tmux", "-V"))
 	fmt.Fprintf(out, "  fzf:        %s\n", versionLine("fzf", "--version"))
 	fmt.Fprintf(out, "  git-crypt:  %s\n", versionLine("git-crypt", "--version"))

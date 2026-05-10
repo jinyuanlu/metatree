@@ -1,0 +1,108 @@
+# auto-tag.yml — when master moves, decide whether to cut a release.
+#
+# Why this exists: v1.0.0 was tagged, then a fix landed on master, but no
+# tag was pushed. install.sh kept handing users the pre-fix binary. This
+# workflow closes the gap: every push to master inspects the new commits
+# and pushes a tag (which triggers release.yml) when they include a
+# user-visible change.
+#
+# Bump rules — Conventional Commits, conservative:
+#   - any `BREAKING CHANGE` line, or `<type>!:` subject → major
+#   - any `feat:` / `feat(...):`                       → minor
+#   - any `fix:`  / `fix(...):`                        → patch
+#   - none of the above (docs/chore/refactor/test/ci)  → no tag
+#
+# The workflow is idempotent: if HEAD is already tagged, it exits cleanly.
+# If two pushes race, the second one finds the tag already exists and
+# skips. Tags can always be pushed manually too — this is a safety net,
+# not a lock.
+
+name: auto-tag
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history + tags to compute the bump
+
+      - name: Decide bump and push tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # If HEAD is already tagged, nothing to do.
+          if git tag --points-at HEAD | grep -q '^v'; then
+            echo "HEAD already tagged: $(git tag --points-at HEAD | tr '\n' ' ')"
+            exit 0
+          fi
+
+          latest="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          if [ -z "$latest" ]; then
+            latest="v0.0.0"
+            range="HEAD"
+          else
+            range="${latest}..HEAD"
+          fi
+          echo "latest tag: $latest"
+          echo "scanning:  $range"
+
+          # Walk commit subjects + bodies. We split on a NUL between commits
+          # so multi-line bodies don't bleed into the next record.
+          subjects="$(git log --format='%s' "$range")"
+          bodies="$(git log --format='%B%x00' "$range")"
+
+          bump=""
+          # Major: subject contains "<type>!:" OR body has "BREAKING CHANGE"
+          if printf '%s\n' "$subjects" | grep -qE '^[a-z]+(\([^)]+\))?!:'; then
+            bump="major"
+          elif printf '%s' "$bodies" | grep -q 'BREAKING CHANGE'; then
+            bump="major"
+          # Minor: any feat:
+          elif printf '%s\n' "$subjects" | grep -qE '^feat(\([^)]+\))?:'; then
+            bump="minor"
+          # Patch: any fix:
+          elif printf '%s\n' "$subjects" | grep -qE '^fix(\([^)]+\))?:'; then
+            bump="patch"
+          fi
+
+          if [ -z "$bump" ]; then
+            echo "no user-visible commits since $latest — not tagging"
+            exit 0
+          fi
+
+          # Parse vX.Y.Z (strip leading v, drop any -suffix).
+          base="${latest#v}"
+          base="${base%%-*}"
+          IFS='.' read -r MAJ MIN PAT <<< "$base"
+          MAJ="${MAJ:-0}"; MIN="${MIN:-0}"; PAT="${PAT:-0}"
+
+          case "$bump" in
+            major) MAJ=$((MAJ+1)); MIN=0; PAT=0 ;;
+            minor) MIN=$((MIN+1)); PAT=0 ;;
+            patch) PAT=$((PAT+1)) ;;
+          esac
+          new="v${MAJ}.${MIN}.${PAT}"
+          echo "bump=$bump  →  $new"
+
+          # Idempotency guard: if someone hand-tagged in the meantime,
+          # exit cleanly rather than trying to clobber.
+          if git rev-parse "$new" >/dev/null 2>&1; then
+            echo "$new already exists — nothing to do"
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$new" -m "auto-release: $bump bump from $latest"
+          git push origin "$new"
+          echo "pushed $new — release.yml will publish binaries"

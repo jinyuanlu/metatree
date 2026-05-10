@@ -32,8 +32,18 @@ lint-sh:
     shellcheck mt.sh install.sh tests/smoke.sh bin/mt bin/mt-test bin/mt-bats
 
 # build the Go binary into ./bin/mt-go
+# Stamps version=<git describe>, commit=<full SHA>, date=<commit date>
+# so `mt --version` and `mt diagnose` identify exactly which commit
+# produced this binary. Mirrors goreleaser's ldflags (.goreleaser.yaml).
 build:
-    go build -o ./bin/mt-go ./cmd/mt
+    #!/usr/bin/env bash
+    set -euo pipefail
+    version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+    commit="$(git rev-parse HEAD 2>/dev/null || echo none)"
+    date="$(git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+    go build -trimpath \
+      -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${date}" \
+      -o ./bin/mt-go ./cmd/mt
 
 # Go unit + integration tests with race detector
 test-go:

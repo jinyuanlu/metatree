@@ -45,7 +45,17 @@ jobs:
         run: go test -race ./...
 
       - name: build mt binary
-        run: go build -o ./bin/mt-go ./cmd/mt
+        # Stamp version+commit+date so the smoke step (and any debug user
+        # who pokes the binary) sees what commit it came from. Mirrors
+        # goreleaser's ldflags in .goreleaser.yaml — keep them in sync.
+        run: |
+          version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
+          commit="$(git rev-parse HEAD)"
+          date="$(git show -s --format=%cI HEAD)"
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.date=${date}" \
+            -o ./bin/mt-go ./cmd/mt
+          ./bin/mt-go --version
 
       - name: smoke
         run: |
