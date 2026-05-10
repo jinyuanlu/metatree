@@ -1,0 +1,16 @@
+# direnv-loaded dev config (per-developer, not shipped)
+.mt.dev.toml
+
+# direnv cache
+.direnv/
+
+# macOS
+.DS_Store
+
+# editor scratch
+*.swp
+*.swo
+*~
+
+# fixture leftover (in case smoke test is interrupted)
+/tmp/mt-smoke.*

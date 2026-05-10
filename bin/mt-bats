@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Pure-function unit test runner. Requires bats-core.
+if ! command -v bats >/dev/null 2>&1; then
+  echo "mt-bats: bats not installed. Run: brew install bats-core" >&2
+  exit 1
+fi
+exec bats "$(cd "$(dirname "$0")/.." && pwd)/tests/mt.bats" "$@"
