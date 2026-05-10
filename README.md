@@ -176,6 +176,33 @@ The Ollama backend has no analog: local model servers have no shared credentials
 
 The full design rationale, domain model, acceptance criteria, and failure modes live in [`spec.md`](spec.md). Worth reading if you're forking or want to understand the auth invariant in detail.
 
+## Troubleshooting
+
+`prefix + g` (or any other binding) does nothing? In order:
+
+```sh
+mt diagnose
+```
+
+Prints versions, current config, tmux state, every binding on this server, and the last 10 log lines. Copy/paste the whole block when reporting an issue.
+
+The two most common causes:
+
+- **Bindings not installed on this tmux server.** Look for `display-popup` lines under `KEYBINDINGS` in `mt diagnose`. If empty, the tmux server was restarted since you ran `mt bind`. Run `mt bind` again. Bindings live in tmux server memory only; they're lost on restart unless you've added the four `bind-key` lines to `~/.tmux.conf`.
+- **`mt switch` is dying silently inside the popup** (popup closes too fast to read the error). Reproduce from a plain shell:
+  ```sh
+  mt switch    # see the actual error message
+  ```
+
+Every invocation is logged to `~/.local/state/mt/mt.log` (override with `MT_LOG`). Tail it while pressing `prefix + g` to see exactly what tmux ran:
+
+```sh
+tail -f ~/.local/state/mt/mt.log
+# then press prefix + g in another terminal
+```
+
+If you see an `INVOKE` line with `cmd=switch` and an `EXIT` line with non-zero `rc=`, that's the failure. If you see no `INVOKE` line at all, the binding never fired (probably not installed — see above).
+
 ## Testing
 
 If you have [`just`](https://github.com/casey/just) installed (`brew install just`):

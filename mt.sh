@@ -37,6 +37,17 @@ slugify() {
 
 expand_tilde() { printf '%s' "${1/#\~/$HOME}"; }
 
+# log location — XDG state dir, override with $MT_LOG. One line per invocation.
+# Useful for debugging tmux-popup invocations whose stdout/stderr you can't see.
+#   tail -f ~/.local/state/mt/mt.log
+MT_LOG="${MT_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/mt/mt.log}"
+
+mt_log() {
+  mkdir -p "$(dirname "$MT_LOG")" 2>/dev/null || return 0
+  printf '[%s] pid=%d %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" "$*" \
+    >> "$MT_LOG" 2>/dev/null || true
+}
+
 # git-crypt encrypted files start with "\x00GITCRYPT\x00" (10 bytes).
 # Detecting this lets us skip auto-direnv-allow on still-encrypted files,
 # which would otherwise authorize direnv to source binary garbage.
@@ -153,6 +164,54 @@ attach_dashboard() {
 # commands
 # ---------------------------------------------------------------------------
 cmd_show() { ensure_dashboard; attach_dashboard; }
+
+cmd_diagnose() {
+  local mt; mt=$(mt_self_path 2>/dev/null || echo "$0")
+  local tmux_v; tmux_v=$(tmux -V 2>&1 | head -1 || echo "tmux NOT installed")
+  local fzf_v;  fzf_v=$(fzf --version 2>&1 | head -1 || echo "fzf NOT installed")
+  local gc_v;   gc_v=$(git-crypt --version 2>&1 | head -1 || echo "git-crypt NOT installed (optional)")
+  local de_v;   de_v=$(direnv --version 2>&1 | head -1 || echo "direnv NOT installed (optional)")
+
+  cat <<EOF
+mt diagnose — copy/paste this entire block when reporting issues.
+
+VERSIONS
+  mt path:    $mt
+  tmux:       $tmux_v
+  fzf:        $fzf_v
+  git-crypt:  $gc_v
+  direnv:     $de_v
+
+CONFIG
+  MT_CONFIG:        ${MT_CONFIG:-(unset, falls back to ~/.config/mt/config.toml)}
+  exists:           $([ -f "${MT_CONFIG:-$HOME/.config/mt/config.toml}" ] && echo yes || echo no)
+  tmux_session:     $MT_TMUX_SESSION
+  tmux_window:      $MT_TMUX_WINDOW
+  default_backend:  $MT_DEFAULT_BACKEND
+  repos_dirs:       ${MT_REPOS_DIRS[*]:-}
+  repos:            ${MT_REPOS[*]:-}
+
+TMUX STATE
+  in_tmux:          ${TMUX:+yes (session = $(tmux display-message -p '#{session_name}' 2>/dev/null))}
+  ${TMUX:-(not in tmux — running from a plain shell)}
+  has-session $MT_TMUX_SESSION:  $(tmux has-session -t="$MT_TMUX_SESSION" 2>&1 && echo "yes" || echo "no")
+
+KEYBINDINGS (look for display-popup; if empty, run 'mt bind')
+$(tmux list-keys -T prefix 2>/dev/null | grep -E 'display-popup' | sed 's/^/  /' || echo "  (no display-popup bindings on this server)")
+
+LOG
+  path: $MT_LOG
+  recent (last 10 lines):
+$(tail -10 "$MT_LOG" 2>/dev/null | sed 's/^/    /' || echo "    (log empty or missing)")
+
+QUICK CHECKS
+  - bindings missing → run 'mt bind'
+  - bindings present but prefix+g does nothing → tmux server may have restarted; re-run 'mt bind'
+  - popup flashes and closes → run the binding's command directly to see the error:
+      $(tmux list-keys -T prefix 2>/dev/null | grep -E '\bg\b.*display-popup' | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+  - 'mt switch' from a plain shell shows the actual error
+EOF
+}
 
 cmd_bind() {
   tmux has-session 2>/dev/null \
@@ -486,6 +545,7 @@ usage:
   mt switch [-z]     fzf jump to any pane (live or dead — dead ones revive)
   mt prune [--force] remove all dead worktrees in one shot (interactive confirm)
   mt bind            install tmux keybindings (prefix+g/G/N/R) for in-agent use
+  mt diagnose        print state for debugging (versions, config, bindings, log)
   mt --help
 
 config: ~/.config/mt/config.toml — empty file is valid (all fields default)
@@ -508,6 +568,12 @@ main() {
     [[ -n "$cur_sess" ]] && MT_TMUX_SESSION="$cur_sess"
     [[ -n "$cur_win" ]] && MT_TMUX_WINDOW="$cur_win"
   fi
+
+  # Globals (not `local`) so the EXIT trap can still see them after main returns.
+  MT_INVOKED_CMD="${1:-show}"
+  mt_log "INVOKE cmd=$MT_INVOKED_CMD args=$* tmux=${MT_TMUX_SESSION}:${MT_TMUX_WINDOW} in_tmux=${TMUX:+yes} cwd=$PWD"
+  trap 'mt_log "EXIT cmd=${MT_INVOKED_CMD:-?} rc=$?"' EXIT
+
   case "${1:-show}" in
     new)       shift; cmd_new "$@";;
     ls)        cmd_ls;;
@@ -515,6 +581,7 @@ main() {
     switch|sw) shift; cmd_switch "$@";;
     prune)     shift; cmd_prune "$@";;
     bind)      cmd_bind;;
+    diagnose|debug) cmd_diagnose;;
     show)      cmd_show;;
     -h|--help) usage;;
     *)         usage; exit 1;;

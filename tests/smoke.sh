@@ -479,7 +479,26 @@ tmux list-panes -t mt-smoke:dashboard -F '#{pane_title}' 2>/dev/null \
   || fail "mt switch did not revive the dead worktree as a new pane"
 pass "mt switch revived dead worktree → new pane acme-api:prune-keep"
 
-section "17. credentials.json is untouched (auth invariant §1.4)"
+section "17. mt logs every invocation; mt diagnose prints state cleanly"
+TEST_LOG="$TMP/mt.log"
+MT_LOG="$TEST_LOG" "$MT" --help >/dev/null 2>&1 || true
+MT_LOG="$TEST_LOG" "$MT" ls >/dev/null 2>&1 || true
+
+[[ -s "$TEST_LOG" ]] || fail "mt did not write to MT_LOG=$TEST_LOG"
+grep -q 'INVOKE cmd=--help' "$TEST_LOG" \
+  || fail "log missing INVOKE entry for --help (got: $(cat "$TEST_LOG"))"
+grep -q 'EXIT cmd=--help' "$TEST_LOG" \
+  || fail "log missing EXIT entry for --help"
+pass "log captures INVOKE + EXIT for each invocation"
+
+# diagnose runs cleanly and includes the key sections
+diag_out=$(MT_LOG="$TEST_LOG" "$MT" diagnose 2>&1)
+echo "$diag_out" | grep -q 'VERSIONS' || fail "diagnose missing VERSIONS section"
+echo "$diag_out" | grep -q 'KEYBINDINGS' || fail "diagnose missing KEYBINDINGS section"
+echo "$diag_out" | grep -q 'LOG' || fail "diagnose missing LOG section"
+pass "mt diagnose prints VERSIONS / KEYBINDINGS / LOG sections"
+
+section "18. credentials.json is untouched (auth invariant §1.4)"
 
 section "13. credentials.json is untouched (auth invariant §1.4)"
 # we don't actually have ~/.claude/.credentials.json in CI, but we can verify
