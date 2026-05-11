@@ -21,6 +21,14 @@ MT_TMUX_SESSION="mt"
 MT_TMUX_WINDOW="dashboard"
 MT_BRANCH_PREFIX="mt"
 MT_WORKTREE_SUBDIR=".worktrees"
+# Start-point for new worktree branches. One of:
+#   "head"           — parent repo's current HEAD (legacy)
+#   "origin-default" — latest fetched origin/<default-branch> (recommended)
+#   "<literal-ref>"  — any git ref (e.g. "main", "v1.2.3", a sha)
+# Overridable per-invocation via $MT_BASE. Validated at config-load time.
+MT_WORKTREE_BASE="origin-default"
+# Timeout (seconds) for `git fetch origin <branch>` during base resolution.
+MT_WORKTREE_FETCH_TIMEOUT="10"
 MT_DEFAULT_BACKEND="claude"
 MT_OLLAMA_MODEL="llama3:8b"
 MT_CLAUDE_CMD="claude"
@@ -119,6 +127,7 @@ load_config() {
         ollama_cmd)      MT_OLLAMA_CMD="$value";;
         auto_direnv_allow) MT_AUTO_DIRENV_ALLOW="$value";;
         auto_status_chrome) MT_AUTO_STATUS_CHROME="$value";;
+        worktree_base)   MT_WORKTREE_BASE="$value";;
       esac
     fi
   done < "$MT_CONFIG"
@@ -170,6 +179,145 @@ validate_worktree_copy_files() {
     out+=("$trimmed")
   done
   MT_WORKTREE_COPY_FILES=("${out[@]}")
+}
+
+# Validate MT_WORKTREE_BASE: must not be empty or whitespace-only after trim.
+# Accepts any other string — git itself reports unresolved refs at use time.
+# Mirrors internal/config/config.go:validateWorktreeBase.
+validate_worktree_base() {
+  local trimmed="${MT_WORKTREE_BASE#"${MT_WORKTREE_BASE%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  [[ -n "$trimmed" ]] \
+    || die "invalid worktree_base: must not be empty (use 'head' to disable, 'origin-default' for the default, or a literal git ref)"
+  MT_WORKTREE_BASE="$trimmed"
+}
+
+# Run command with a SIGTERM-then-SIGKILL timeout (no `timeout` cmd dep —
+# macOS doesn't ship one). Returns the command's exit code, or 124 on
+# timeout (matches GNU timeout convention). Pure bash 3.2 compatible.
+_mt_with_timeout() {
+  local secs="$1"; shift
+  "$@" &
+  local pid=$!
+  ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null
+    sleep 1 && kill -KILL "$pid" 2>/dev/null ) &
+  local killer=$!
+  # `wait` without -n (3.2 has no -n); we wait on the specific pid.
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  # Reap the killer; it'll exit on its own once pid is gone.
+  kill -KILL "$killer" 2>/dev/null
+  wait "$killer" 2>/dev/null
+  # If the cmd died by SIGTERM (rc 143) or SIGKILL (137), treat as timeout.
+  if [ "$rc" -eq 143 ] || [ "$rc" -eq 137 ]; then return 124; fi
+  return "$rc"
+}
+
+# Echoes the default branch name on stdout, returns non-zero on failure.
+# Tries: git symbolic-ref → main → master → develop → trunk.
+# Return codes: 0 ok, 2 no origin remote, 1 origin exists but no candidate.
+default_branch() {
+  local repo="$1" ref name
+  # Primary: symbolic-ref of origin/HEAD (set by `git remote set-head origin -a`).
+  ref=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
+  if [ -n "$ref" ]; then
+    printf '%s' "${ref#origin/}"
+    return 0
+  fi
+  if ! git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+    return 2
+  fi
+  for name in main master develop trunk; do
+    if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$name"; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Runs `git fetch origin <branch>` with the given timeout (default 10s).
+# GIT_TERMINAL_PROMPT=0 so credential prompts fail fast instead of hanging
+# invisibly inside a tmux popup. Returns 124 on timeout.
+fetch_branch() {
+  local repo="$1" branch="$2" timeout="${3:-10}"
+  GIT_TERMINAL_PROMPT=0 _mt_with_timeout "$timeout" \
+    git -C "$repo" fetch origin "$branch" >/dev/null 2>&1
+}
+
+# Echoes the short (8-char) sha of REF in REPO on stdout, or returns
+# non-zero if the ref doesn't resolve. Silent on stderr.
+_mt_rev_parse_short() {
+  local repo="$1" ref="$2"
+  git -C "$repo" rev-parse --short=8 "$ref" 2>/dev/null
+}
+
+# resolve_worktree_base REPO CFG_VALUE BRANCH_NAME
+# Mirrors internal/gitio/gitio.go:ResolveWorktreeBase + ResolveResult.Format.
+# On success: prints "<ref>\t<summary>" to stdout, returns 0. The caller
+# splits on TAB; <ref> is empty when the caller should omit the start-point
+# arg (HEAD-mode); <summary> is the human-facing "mt: branched ..." line.
+# On hard error (e.g. origin-default but no origin): prints the remediation
+# message to stderr and returns non-zero.
+resolve_worktree_base() {
+  local repo="$1" cfg="$2" branch_name="$3"
+  local sha def origin_ref
+  case "$cfg" in
+    ""|head)
+      sha=$(_mt_rev_parse_short "$repo" HEAD) \
+        || { printf 'mt: cannot resolve HEAD in %s\n' "$repo" >&2; return 1; }
+      printf '\tmt: branched %s from HEAD@%s' "$branch_name" "$sha"
+      return 0
+      ;;
+    origin-default)
+      def=$(default_branch "$repo")
+      local rc=$?
+      if [ $rc -ne 0 ]; then
+        if [ $rc -eq 2 ]; then
+          printf 'mt: cannot resolve worktree base "origin-default" — repo %s has no "origin" remote.\n' "$repo" >&2
+          printf '    fix: either add one (git remote add origin <url>)\n' >&2
+          printf '    or set worktree_base = "head" in ~/.metatree/config.toml\n' >&2
+        else
+          printf 'mt: cannot resolve worktree base "origin-default" — no default branch found on origin (tried main/master/develop/trunk)\n' >&2
+        fi
+        return 1
+      fi
+      origin_ref="origin/$def"
+      # Try fetch first.
+      if fetch_branch "$repo" "$def" "${MT_WORKTREE_FETCH_TIMEOUT:-10}"; then
+        sha=$(_mt_rev_parse_short "$repo" "$origin_ref")
+        if [ -n "$sha" ]; then
+          printf '%s\tmt: branched %s from %s@%s' "$origin_ref" "$branch_name" "$origin_ref" "$sha"
+          return 0
+        fi
+      fi
+      # Fetch failed or ref still missing; walk the fallback ladder.
+      sha=$(_mt_rev_parse_short "$repo" "$origin_ref")
+      if [ -n "$sha" ]; then
+        printf '%s\tmt: branched %s from %s@%s (stale: fetch failed)' "$origin_ref" "$branch_name" "$origin_ref" "$sha"
+        return 0
+      fi
+      sha=$(_mt_rev_parse_short "$repo" "$def")
+      if [ -n "$sha" ]; then
+        printf '%s\tmt: branched %s from local %s@%s (offline, no %s)' "$def" "$branch_name" "$def" "$sha" "$origin_ref"
+        return 0
+      fi
+      sha=$(_mt_rev_parse_short "$repo" HEAD)
+      printf '\tmt: branched %s from HEAD@%s (last-resort fallback)' "$branch_name" "$sha"
+      return 0
+      ;;
+    *)
+      sha=$(_mt_rev_parse_short "$repo" "$cfg")
+      if [ -n "$sha" ]; then
+        printf '%s\tmt: branched %s from %s@%s' "$cfg" "$branch_name" "$cfg" "$sha"
+      else
+        # Unknown ref: still pass through to `git worktree add` and let
+        # git itself produce the failure message (matches Go behavior).
+        printf '%s\tmt: branched %s from %s' "$cfg" "$branch_name" "$cfg"
+      fi
+      return 0
+      ;;
+  esac
 }
 
 # Copies entries in MT_WORKTREE_COPY_FILES from $1 (parent repo) to
@@ -430,6 +578,7 @@ CONFIG
   repos_dirs:       ${MT_REPOS_DIRS[*]:-}
   repos:            ${MT_REPOS[*]:-}
   worktree_copy_files: ${MT_WORKTREE_COPY_FILES[*]:-}
+  worktree_base:    ${MT_WORKTREE_BASE:-}
 
 TMUX STATE
   in_tmux:          ${TMUX:+yes (session = $(tmux display-message -p '#{session_name}' 2>/dev/null))}
@@ -680,6 +829,17 @@ cmd_new() {
       | grep -qFx "$resolved" \
       || die "path exists: $worktree_path"
   else
+    # Resolve start-point from worktree_base config (or MT_BASE env override).
+    # The helper prints "<ref>\t<summary>" on stdout; empty <ref> means
+    # "use parent HEAD" (omit the start-point arg).
+    local effective_base="${MT_BASE:-$MT_WORKTREE_BASE}"
+    local resolved start_point summary
+    resolved=$(resolve_worktree_base "$repo" "$effective_base" "$full_branch") \
+      || exit $?
+    start_point="${resolved%%	*}"
+    summary="${resolved#*	}"
+    printf '%s\n' "$summary" >&2
+
     # If the parent repo uses git-crypt, plain `git worktree add` fails: the
     # smudge filter runs in the new worktree's context where GIT_DIR points
     # at <parent>/.git/worktrees/<name>, but git-crypt looks for its key at
@@ -689,8 +849,13 @@ cmd_new() {
     # git dir, then check out files (smudge now finds the key, decrypts).
     if [[ -f "$repo/.git/git-crypt/keys/default" ]] \
        && command -v git-crypt >/dev/null 2>&1; then
-      git -C "$repo" worktree add --no-checkout -b "$full_branch" "$worktree_path" \
-        || exit $?
+      if [[ -n "$start_point" ]]; then
+        git -C "$repo" worktree add --no-checkout -b "$full_branch" "$worktree_path" "$start_point" \
+          || exit $?
+      else
+        git -C "$repo" worktree add --no-checkout -b "$full_branch" "$worktree_path" \
+          || exit $?
+      fi
       local wt_name wt_git_dir parent_key
       wt_name=$(basename "$worktree_path")
       wt_git_dir="$repo/.git/worktrees/$wt_name"
@@ -701,7 +866,11 @@ cmd_new() {
       fi
       git -C "$worktree_path" checkout HEAD -- . >/dev/null 2>&1 || true
     else
-      git -C "$repo" worktree add -b "$full_branch" "$worktree_path" || exit $?
+      if [[ -n "$start_point" ]]; then
+        git -C "$repo" worktree add -b "$full_branch" "$worktree_path" "$start_point" || exit $?
+      else
+        git -C "$repo" worktree add -b "$full_branch" "$worktree_path" || exit $?
+      fi
     fi
 
     # Auto-copy gitignored runtime files so the new worktree can run.
@@ -848,6 +1017,7 @@ EOF
 main() {
   load_config
   validate_worktree_copy_files
+  validate_worktree_base
   # When invoked from inside tmux (e.g. via the prefix+g popup binding),
   # operate on the *calling* session, not whatever the config says. This
   # makes a single binding work across multiple mt sessions (mt, mt-dev,
