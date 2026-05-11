@@ -2,7 +2,7 @@
 
 A control-plane CLI that spawns Claude Code or Ollama sessions in fresh git worktrees, presented as a single tiled tmux dashboard so multiple repos are visible and operable on one page. Single static Go binary, no daemon, no TUI, no install dance.
 
-![mt new in action — pick repo, name branch, fresh worktree branched from origin/main, agent launches](demo.gif)
+![mt: spawn an agent in one repo, prefix+g to a switch popup, + Create new for a second repo (tiled view), prefix+g again to revive a dead worktree — three agents in one tmux window](demo.gif)
 
 ```
 ┌─────────────────────┬───────────────────────┐
@@ -12,8 +12,6 @@ A control-plane CLI that spawns Claude Code or Ollama sessions in fresh git work
 │ sideproject:llama-spike  (ollama, idle)     │
 └─────────────────────────────────────────────┘
 ```
-
-> Re-record the demo with `./demo/record.sh` (requires [vhs](https://github.com/charmbracelet/vhs)). The script in `demo/record.sh` sets up a throwaway fixture repo + fake agent and runs `vhs demo/demo.tape`.
 
 ## The aha
 
@@ -38,6 +36,18 @@ go install github.com/jinyuanlu/metatree/cmd/mt@latest
 ```
 
 Requires: `tmux` 3.2+ (for `display-popup`), `git` ≥ 2.5, `fzf`. Already on every developer Mac. Ollama and Claude Code are optional — install whichever backend you use.
+
+## Quick start
+
+From zero to first agent in three commands:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
+mt bind              # one-time tmux keybindings (prefix+g / N / R)
+mt new               # pick repo, name branch, agent launches in fresh worktree
+```
+
+After that, bare `mt` reattaches yesterday's dashboard. `prefix + g` switches between agents from inside an active Claude/Ollama prompt — the killer move (see [Daily cheat sheet](#daily-cheat-sheet)).
 
 ## Usage
 
@@ -74,9 +84,10 @@ mt setup --reset          # forget current; rewrite from defaults
 
 Setting `claude_cmd` literally (with all the flags you want) is the recommended way to load MCP — no shell aliases, no surprises.
 
-By default, `mt new` also copies `.env`, `.envrc`, and `.npmrc` from the parent repo into each fresh worktree so it runs out of the box. Customize the list (or set it to `[]` to disable) via `worktree_copy_files` in the config below.
+Two `mt new` behaviors worth knowing about up front (both fully described in [Config](#config) below):
 
-By default, `mt new` also fetches `origin`'s default branch and branches your new worktree from `origin/<default>` (instead of the parent repo's current HEAD). Override to `worktree_base = "head"` to branch from HEAD (the legacy behavior), or set it to any literal ref. Per-invocation: `MT_BASE=head mt new` for stacking workflows.
+- **Runtime files are auto-copied** — `.env`, `.envrc`, `.npmrc` carry from the parent repo into each fresh worktree so it runs out of the box. Customize via `worktree_copy_files`.
+- **Worktrees branch from `origin/<default>`** — not from the parent's stale HEAD. Override per-invocation with `MT_BASE=head mt new` (handy for stacking on a feature branch), or globally with `worktree_base = "head"`.
 
 ## Upgrading
 
@@ -222,7 +233,8 @@ There are several adjacent tools. `mt`'s wedge:
 
 If those aren't your priorities, [`claude-squad`](https://github.com/smtg-ai/claude-squad), [`cmux`](https://github.com/craigsc/cmux), [`ccmanager`](https://github.com/kbwo/ccmanager), [`muxtree`](https://dev.to/b-d055/introducing-muxtree-dead-simple-worktree-tmux-sessions-for-ai-coding-2kf2) are all good neighbors.
 
-## How `claude_cmd` is launched
+<details>
+<summary><b>How <code>claude_cmd</code> is launched</b> — implementation detail; expand only if your alias-driven flags aren't reaching the agent</summary>
 
 `mt` runs `claude` (and `ollama`) through your interactive shell so that any alias you've defined for the agent is honored — the typical case is `alias claude='claude --mcp-config ~/.claude/mcp.json'`, and that flag survives every `mt new`. This applies to both the first pane and every subsequent pane.
 
@@ -233,14 +245,16 @@ Concretely:
 
 We deliberately do **not** prefix the inner command with `exec`: in both bash and zsh, `exec <name>` is a special-builtin form that suppresses alias expansion on its argument, which would silently drop the `--mcp-config` flag from your alias and load the bare `claude` binary.
 
-The wrap is enabled when `$SHELL` is `bash`, `zsh`, or `fish`. For other shells (nushell, PowerShell, dash, …), `mt` passes the command through unchanged — the same behavior as before this guarantee existed — and prints a one-line warning so you know aliases won't expand. Bake the literal command into config to recover:
+The wrap is enabled when `$SHELL` is `bash`, `zsh`, or `fish`. For other shells (nushell, PowerShell, dash, …), `mt` passes the command through unchanged and prints a one-line warning so you know aliases won't expand. Bake the literal command into config to recover:
 
 ```toml
-# ~/.config/mt/config.toml
+# ~/.metatree/config.toml
 claude_cmd = "claude --mcp-config $HOME/.claude/mcp.json"
 ```
 
 That string is honored verbatim, regardless of shell.
+
+</details>
 
 ## Auth invariant (Claude Code)
 
@@ -270,10 +284,10 @@ Three documents:
 
 `mt` configures two pieces of native tmux chrome on its dashboard window so you always know where you are, even when an agent has overwritten the terminal title:
 
-- **Pane border (top of each pane)** — shows `<index> <repo>:<branch> (<command>)`. The `<repo>:<branch>` part is the stable mt marker (a tmux per-pane user option, immune to OSC escape sequences from inside the agent).
+- **Pane border (top of each pane)** — shows `<index> <repo>:<branch> [<base-ref>] (<command>)`, e.g. `0 acme-api:fix-cookie [origin/main] (bash)`. The `<repo>:<branch>` part is the stable mt marker (a tmux per-pane user option, immune to OSC escape sequences from inside the agent); `[<base-ref>]` is the ref the worktree was branched from (omitted on respawned worktrees).
 - **Status bar (bottom right)** — shows the active pane's `<repo>:<branch>` marker, the actual filesystem cwd (`#{pane_current_path}`, truncated to 50 chars), and a clock. Refreshes every 2 seconds.
 
-Both are scoped to mt's session/window only — your other tmux sessions are untouched. Disable with `auto_status_chrome = "false"` in `~/.config/mt/config.toml`.
+Both are scoped to mt's session/window only — your other tmux sessions are untouched. Disable with `auto_status_chrome = "false"` in `~/.metatree/config.toml`.
 
 **MCP status**: Claude Code's MCP state isn't exposed to tmux. Any "live" indicator would mean polling `claude mcp list` on a tmux refresh interval, which adds latency and load. If Claude ships a way to read MCP state from a file in the future (`~/.claude/mcp-status.json` or similar), `mt` can pick it up via `#{?mcp_ok,✓,✗}` in the status line — until then, use Claude's own `/doctor` to check.
 
