@@ -114,6 +114,11 @@ func RunNew(env *Env, args []string) error {
 		return err
 	}
 
+	// Copy gitignored runtime files (.env, .envrc, …) from parent to
+	// worktree before direnv-allow so a freshly-copied .envrc gets
+	// auto-approved by the existing block below — zero new code there.
+	copyRuntimeFiles(env, repo, worktreePath)
+
 	// Auto-direnv-allow: skip if .envrc is still git-crypt-encrypted.
 	if env.Config.AutoDirenvAllow {
 		envrc := filepath.Join(worktreePath, ".envrc")
@@ -453,6 +458,19 @@ func RunPrune(env *Env, args []string) error {
 	}
 	fmt.Fprintf(env.Stdout, "\n%d removed, %d skipped\n", removed, skipped)
 	return nil
+}
+
+// copyRuntimeFiles runs the worktree_copy_files step and prints any
+// non-empty user-facing Summary to env.Stderr. Extracted from RunNew so
+// the call site is unit-testable without standing up tmux + dashboard.
+func copyRuntimeFiles(env *Env, repo, worktreePath string) {
+	if len(env.Config.WorktreeCopyFiles) == 0 {
+		return
+	}
+	rpt := gitio.CopyRuntimeFiles(repo, worktreePath, env.Config.WorktreeCopyFiles)
+	if s := rpt.Summary(); s != "" {
+		fmt.Fprintln(env.Stderr, s)
+	}
 }
 
 // helpers ---

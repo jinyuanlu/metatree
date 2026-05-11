@@ -1,8 +1,13 @@
 package command
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jinyuanlu/metatree/internal/config"
 )
 
 func TestWrapAgentCmd_RecognizedShells(t *testing.T) {
@@ -101,5 +106,77 @@ func TestShellOrUnset(t *testing.T) {
 	t.Setenv("SHELL", "")
 	if got := shellOrUnset(); got != "(unset)" {
 		t.Errorf("got %q, want (unset)", got)
+	}
+}
+
+// newCopyEnv builds an *Env wired to a captured stderr buffer with the
+// given worktree_copy_files list. Used by the three TestNew_CopyRuntimeFiles
+// cases below to drive copyRuntimeFiles without standing up tmux.
+func newCopyEnv(t *testing.T, copyFiles []string) (*Env, *bytes.Buffer) {
+	t.Helper()
+	cfg := config.Default()
+	cfg.WorktreeCopyFiles = copyFiles
+	var stderr bytes.Buffer
+	return &Env{
+		Config: cfg,
+		Stdout: &bytes.Buffer{},
+		Stderr: &stderr,
+	}, &stderr
+}
+
+func TestNew_CopyRuntimeFiles_EmptyListSkipsStep(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	// Populate src with .env so we'd see a copy if the guard failed.
+	if err := os.WriteFile(filepath.Join(src, ".env"), []byte("FOO=bar"), 0o644); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	env, stderr := newCopyEnv(t, nil)
+	copyRuntimeFiles(env, src, dst)
+
+	out := stderr.String()
+	if strings.Contains(out, "mt: copied") || strings.Contains(out, "mt: copy") {
+		t.Errorf("expected silent skip for empty copy list, got stderr:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".env")); !os.IsNotExist(err) {
+		t.Errorf("expected no copy to happen, but dst/.env exists (err=%v)", err)
+	}
+}
+
+func TestNew_CopyRuntimeFiles_HappyPathPrintsSummary(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	want := []byte("FOO=bar")
+	if err := os.WriteFile(filepath.Join(src, ".env"), want, 0o644); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	env, stderr := newCopyEnv(t, []string{".env"})
+	copyRuntimeFiles(env, src, dst)
+
+	out := stderr.String()
+	if !strings.Contains(out, "mt: copied .env") {
+		t.Errorf("expected 'mt: copied .env' on stderr, got:\n%s", out)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, ".env"))
+	if err != nil {
+		t.Fatalf("read dst/.env: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Errorf("copied bytes mismatch:\n got:  %q\n want: %q", got, want)
+	}
+}
+
+func TestNew_CopyRuntimeFiles_NothingCopyableIsSilent(t *testing.T) {
+	src := t.TempDir() // empty — neither .env nor .envrc present
+	dst := t.TempDir()
+
+	env, stderr := newCopyEnv(t, []string{".env", ".envrc"})
+	copyRuntimeFiles(env, src, dst)
+
+	out := stderr.String()
+	if strings.Contains(out, "mt: copy") || strings.Contains(out, "mt: copied") {
+		t.Errorf("expected silent output when all sources missing, got:\n%s", out)
 	}
 }

@@ -261,6 +261,54 @@ func TestNewCreatesWorktreeAndPane(t *testing.T) {
 	}
 }
 
+// TestIntegration_NewWorktreeCopiesEnvFile — end-to-end proof that
+// worktree_copy_files in config causes `mt new` to copy gitignored runtime
+// files from the parent repo into the freshly-created worktree.
+func TestIntegration_NewWorktreeCopiesEnvFile(t *testing.T) {
+	f := setup(t)
+
+	// Overwrite the fixture config to enable worktree_copy_files. Keep
+	// everything else identical to setup()'s defaults so the rest of the
+	// test path (tmux, claude_cmd=cat) still works.
+	mustWrite(t, f.configPath, fmt.Sprintf(`repos = ["%s"]
+tmux_session = "mt-itest"
+tmux_window = "dashboard"
+branch_prefix = "itest"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "cat"
+auto_direnv_allow = false
+auto_status_chrome = false
+worktree_copy_files = [".env"]
+`, f.repoPath))
+
+	// Drop a gitignored .env into the parent repo (not committed —
+	// it's the kind of file the feature exists to copy).
+	envContent := []byte("DATABASE_URL=local")
+	mustWrite(t, filepath.Join(f.repoPath, ".env"), string(envContent))
+
+	cmd := exec.Command(f.mtBin, "new", "--with", "claude")
+	cmd.Env = append(os.Environ(),
+		"MT_CONFIG="+f.configPath,
+		"TMUX_TMPDIR="+f.tmuxSock,
+		"TMUX=",
+		"MT_REPO="+f.repoPath,
+		"MT_BRANCH=copytest",
+	)
+	// mt exits non-zero when tmux attach fails (no TTY in tests); that's
+	// after the copy step we care about. Run to completion — matches the
+	// pattern in TestNewCreatesWorktreeAndPane.
+	_ = cmd.Run()
+
+	copied, err := os.ReadFile(filepath.Join(f.repoPath, ".worktrees", "copytest", ".env"))
+	if err != nil {
+		t.Fatalf("worktree .env not created: %v", err)
+	}
+	if !bytes.Equal(copied, envContent) {
+		t.Errorf("worktree .env contents mismatch:\n got:  %q\n want: %q", copied, envContent)
+	}
+}
+
 // TestAuthInvariantNoCredentialRefs — production Go code (cmd/, internal/)
 // must not contain string references to credentials.json or ANTHROPIC_ env
 // vars. Test code (this file, others under tests/) is exempt because tests
