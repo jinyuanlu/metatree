@@ -3,7 +3,7 @@
 // keybindings, and the @mt-managed pane registry.
 //
 // dashboard composes tmuxio (which it owns the right to call); it does NOT
-// shell out directly. See spec-go.md §10 (pane registry) and §12 (dashboard
+// shell out directly. See CONTRIBUTING.md §10 (pane registry) and §12 (dashboard
 // chrome and bindings).
 package dashboard
 
@@ -18,7 +18,7 @@ import (
 
 // MtManagedKey is the per-pane user option mt sets to identify its panes.
 // Stable across OSC 2 escape sequences emitted by Claude or other agents,
-// which would otherwise clobber pane_title. See spec-go.md §10.
+// which would otherwise clobber pane_title. See CONTRIBUTING.md §10.
 const MtManagedKey = "@mt-managed"
 
 // MtBaseKey is the per-pane user option mt sets to record which ref the
@@ -145,7 +145,7 @@ func InstallBindings(mtPath string) error {
 // source of truth), and the @mt-base option (the resolved ref the new
 // worktree was branched from, rendered into the pane border). baseRef
 // may be empty for panes created without a resolved base; the option is
-// not set in that case. See spec-go.md §10.
+// not set in that case. See CONTRIBUTING.md §10.
 func MarkPane(id tmuxio.PaneID, title, baseRef string) error {
 	// pane-title for visible border; ignore errors (cosmetic)
 	_ = tmuxio.SetPaneTitle(id, title)

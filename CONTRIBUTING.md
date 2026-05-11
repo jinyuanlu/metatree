@@ -1,12 +1,11 @@
-# `mt` — Go Implementation Specification
+# Contributing to `mt`
 
-> Companion to [`spec.md`](spec.md), which defines the **product** (commands,
-> behaviors, acceptance criteria, auth invariant). This document defines
-> **how the Go implementation realizes that product** — package layout,
-> error handling, testing, distribution.
->
-> The product spec is the source of truth for behavior. If this document and
-> `spec.md` ever disagree, `spec.md` wins.
+> What you need to know to land code in `mt` — package layout, error
+> handling, testing tiers, distribution, anti-patterns. Companion to
+> [`spec.md`](spec.md), which defines the **product** (commands, behaviors,
+> acceptance criteria, auth invariant). The product spec is the source of
+> truth for behavior; this document is the source of truth for how the Go
+> implementation realizes that behavior. If the two disagree, `spec.md` wins.
 
 ---
 
@@ -163,7 +162,7 @@ metatree/
 ├── install.sh                       # rewritten to fetch binary
 ├── mt.sh                            # bash reference impl, maintained in lockstep
 ├── spec.md                          # product spec
-├── spec-go.md                       # this file
+├── CONTRIBUTING.md                  # this file
 ├── Justfile
 ├── LICENSE
 └── README.md
@@ -1015,7 +1014,7 @@ prototype."
 | v1.2.0  | First post-port feature (TBD; not pre-committed).              |
 | v2.0.0  | TBD — original "remove mt.sh" plan superseded by lockstep maintenance (see §16 note). |
 
-`spec.md` and `spec-go.md` get updated together. Breaking changes to either
+`spec.md` and this guide get updated together. Breaking changes to either
 require a major version bump.
 
 ---

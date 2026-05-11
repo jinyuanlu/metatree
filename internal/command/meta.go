@@ -109,7 +109,7 @@ Requires tmux 3.2+ (display-popup).
 	return nil
 }
 
-// RunDiagnose dumps state for issue reports. See spec-go.md §13 (bind/
+// RunDiagnose dumps state for issue reports. See CONTRIBUTING.md §13 (bind/
 // diagnose are in meta.go) and the bash cmd_diagnose function for the
 // section ordering.
 func RunDiagnose(env *Env, args []string) error {

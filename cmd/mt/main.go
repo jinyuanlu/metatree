@@ -1,5 +1,5 @@
 // Command mt is the tmux-native control plane for Claude Code and Ollama
-// across git worktrees. See spec.md for the product, spec-go.md for the
+// across git worktrees. See spec.md for the product, CONTRIBUTING.md for the
 // implementation.
 package main
 

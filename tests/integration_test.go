@@ -217,7 +217,7 @@ func TestDiagnoseAllSections(t *testing.T) {
 }
 
 // TestNewCreatesWorktreeAndPane — happy path: worktree + branch + pane
-// + @mt-managed (per spec.md §2.7.2 + spec-go.md §10).
+// + @mt-managed (per spec.md §2.7.2 + CONTRIBUTING.md §10).
 func TestNewCreatesWorktreeAndPane(t *testing.T) {
 	f := setup(t)
 
@@ -458,7 +458,7 @@ func TestIntegration_RespawnExistingWorktreeSkipsBranchedFromLine(t *testing.T) 
 // vars. Test code (this file, others under tests/) is exempt because tests
 // have to mention the strings they assert are absent.
 //
-// Per spec.md §1.4 and spec-go.md §17 anti-pattern #1.
+// Per spec.md §1.4 and CONTRIBUTING.md §17 anti-pattern #1.
 func TestAuthInvariantNoCredentialRefs(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {

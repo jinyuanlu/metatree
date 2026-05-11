@@ -5,7 +5,7 @@ import "fmt"
 // ExitError carries an exit code through error returns. main.go uses
 // errors.As to recover the code; bare errors map to exit 1.
 //
-// See spec-go.md §6 (Errors and exit codes). Standard codes:
+// See CONTRIBUTING.md §6 (Errors and exit codes). Standard codes:
 //
 //	0  — success (no error)
 //	1  — generic mt error

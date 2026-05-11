@@ -1,7 +1,7 @@
 // Integration tests for tmuxio.
 //
 // These tests run a real tmux server inside an isolated TMUX_TMPDIR.
-// Per spec-go.md §17 #9, we do NOT mock tmux — the mock surface is the
+// Per CONTRIBUTING.md §17 #9, we do NOT mock tmux — the mock surface is the
 // integration test surface, and faithfully simulating tmux's socket
 // limit and OSC behavior is not worth it.
 //

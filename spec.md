@@ -4,7 +4,7 @@
 >
 > This document defines the **product**: commands, behaviors, acceptance
 > criteria, invariants. For the **Go implementation** (package layout,
-> error handling, testing, distribution), see [`spec-go.md`](spec-go.md).
+> error handling, testing, distribution), see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 > The Go binary is the production implementation from v1.0 onward; `mt.sh`
 > is maintained in lockstep as the bash reference implementation, used as
 > an executable spec for cross-implementation regression testing.

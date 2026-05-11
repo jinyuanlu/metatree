@@ -22,7 +22,7 @@ var dashRunRe = regexp.MustCompile(`-+`)
 // Slugify normalizes a user-typed branch name to mt's allowed shape.
 // Returns an error if the result is empty (e.g. all special chars).
 //
-// Decision: Slugify knows nothing about prefixes (per spec-go.md §18 #3).
+// Decision: Slugify knows nothing about prefixes (per CONTRIBUTING.md §18 #3).
 // The branch_prefix is applied at call sites.
 func Slugify(input string) (string, error) {
 	s := strings.ToLower(strings.TrimSpace(input))
@@ -36,7 +36,7 @@ func Slugify(input string) (string, error) {
 }
 
 // RunNew creates a worktree and launches the chosen agent in a pane on
-// the dashboard. Idempotent on (repo, branch). See spec-go.md §11 for the
+// the dashboard. Idempotent on (repo, branch). See CONTRIBUTING.md §11 for the
 // git-crypt path; mt.sh's cmd_new for the bash reference.
 //
 // Env overrides MT_REPO and MT_BRANCH let cmd_new run non-interactively
@@ -270,13 +270,13 @@ func ensureWorktree(repo, fullBranch, worktreePath, startPoint string) error {
 	}
 
 	if gitio.GitCryptInUse(repo) {
-		// --no-checkout, copy key, checkout. Per spec-go.md §11.
+		// --no-checkout, copy key, checkout. Per CONTRIBUTING.md §11.
 		if err := gitio.WorktreeAddNoCheckout(repo, fullBranch, worktreePath, startPoint); err != nil {
 			return ExitWith(1, "%v", err)
 		}
 		if err := gitio.InstallGitCryptKey(repo, worktreePath); err != nil {
 			// key copy failed (e.g., source key missing) — log and continue
-			// per spec-go.md §11 "git-crypt failure chain"
+			// per CONTRIBUTING.md §11 "git-crypt failure chain"
 			fmt.Fprintf(stderrOf(),
 				"mt: warning: git-crypt key install failed (%v); files may be encrypted\n",
 				err)

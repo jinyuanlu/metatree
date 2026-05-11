@@ -1,7 +1,7 @@
 // Package command holds the per-subcommand entry points for mt. Each
 // subcommand is a Run<Name>(env *Env, args []string) error function. They
 // orchestrate calls into config, dashboard, gitio, and tmuxio — they do NOT
-// shell out directly. See spec-go.md §13 for the contract.
+// shell out directly. See CONTRIBUTING.md §13 for the contract.
 package command
 
 import (
@@ -25,7 +25,7 @@ type Env struct {
 }
 
 // New builds an Env from a loaded config + ambient tmux state. Honors the
-// auto-detect rule from spec-go.md §13: when invoked from inside tmux,
+// auto-detect rule from CONTRIBUTING.md §13: when invoked from inside tmux,
 // the calling session/window override config.
 func New(cfg *config.Config) *Env {
 	env := &Env{

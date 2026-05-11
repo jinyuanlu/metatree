@@ -229,7 +229,7 @@ There are several adjacent tools. `mt`'s wedge:
 
 - **`mt` is one tmux window with tiled panes**, not one window per session. The dashboard is the unit of persistence — every repo is visible at once, no `prefix + w` listings to scroll. Most alternatives use one tmux window per agent.
 - **Dual backend (Claude Code + Ollama) with the same UX.** Most tools are Claude-only or Codex-only.
-- **Single static Go binary.** No TUI framework, no terminal-emulator requirements, no runtime to install. The binary is small enough to vendor; the source is small enough to read in one sitting (see [`spec-go.md`](spec-go.md) for the architecture).
+- **Single static Go binary.** No TUI framework, no terminal-emulator requirements, no runtime to install. The binary is small enough to vendor; the source is small enough to read in one sitting (see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the architecture).
 
 If those aren't your priorities, [`claude-squad`](https://github.com/smtg-ai/claude-squad), [`cmux`](https://github.com/craigsc/cmux), [`ccmanager`](https://github.com/kbwo/ccmanager), [`muxtree`](https://dev.to/b-d055/introducing-muxtree-dead-simple-worktree-tmux-sessions-for-ai-coding-2kf2) are all good neighbors.
 
@@ -270,15 +270,13 @@ This means parallel sessions cannot race on credentials by way of `mt`. Anthropi
 
 The Ollama backend has no analog: local model servers have no shared credentials.
 
-## Spec
+## Spec & contributing
 
-Three documents:
+- **[`spec.md`](spec.md)** — the **product** spec: commands, behaviors, acceptance criteria, the auth invariant (§1.4), the dashboard topology (§2.5), the failure-modes table (§2.8). The source of truth for what `mt` does.
+- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** — what you need to land code: package layout, error handling, testing tiers, distribution, anti-patterns. Faster than reading the code.
+- **[`TODOS.md`](TODOS.md)** — deferred work and v2 candidates with the design context captured (so future-you doesn't re-derive it).
 
-- **[`spec.md`](spec.md)** — the **product** spec. Commands, behaviors, acceptance criteria, the auth invariant (§1.4), the dashboard topology (§2.5), the failure-modes table (§2.8). This is the source of truth for what `mt` does.
-- **[`spec-go.md`](spec-go.md)** — the **Go implementation** spec. Package layout, error handling, testing strategy, distribution, anti-patterns. Reading this before contributing code is faster than reading the code.
-- **[`TODOS.md`](TODOS.md)** — deferred work and v2 candidates with the design context captured (so future-you doesn't re-derive it from scratch).
-
-`mt.sh` is the bash reference implementation, maintained in lockstep with the Go binary. The Go port is the production implementation users install as of v1.0; `mt.sh` exists as an executable spec for cross-implementation regression testing and as a second source-of-truth for behavior. Both specs stay aligned; if they diverge, the product spec wins.
+`mt.sh` is the bash reference implementation, maintained in lockstep with the Go binary as an executable cross-implementation regression check. The Go port is the production implementation users install as of v1.0; if the two ever disagree, `spec.md` wins.
 
 ## What you see on the dashboard
 

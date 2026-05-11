@@ -1,7 +1,7 @@
 // Package config defines the on-disk TOML configuration for mt and provides
 // the single source of truth for default values.
 //
-// The schema mirrors spec.md §2.6 and spec-go.md §7. Bash-era configs use
+// The schema mirrors spec.md §2.6 and CONTRIBUTING.md §7. Bash-era configs use
 // quoted booleans (auto_direnv_allow = "true"); Go-era configs prefer native
 // booleans (auto_direnv_allow = true). Both forms are accepted so users
 // migrating from the bash port don't have to rewrite their config.

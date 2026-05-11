@@ -4,12 +4,12 @@
 // *exec.Cmd with explicit args (no shell quoting), and returns typed
 // values plus a wrapped error that names the verb attempted.
 //
-// The contract is locked in spec-go.md §9. The pane-identity rule from
+// The contract is locked in CONTRIBUTING.md §9. The pane-identity rule from
 // §10 is enforced at the type level: callers learn about a pane only
 // through the Pane struct, whose MtManaged field is the stable
 // identity. pane_title is informational and never returned.
 //
-// Anti-pattern compliance (spec-go.md §17):
+// Anti-pattern compliance (CONTRIBUTING.md §17):
 //   - #1 (no os/exec outside tmuxio/gitio): satisfied — all exec.Cmd
 //     construction lives here.
 //   - #2 (never parse pane_title for identity): the format string used
@@ -44,7 +44,7 @@ type WindowName string
 //
 // Note: pane_title is intentionally absent. mt-managed identity goes
 // through the MtManaged field (sourced from the @mt-managed user
-// option), never through pane_title. See spec-go.md §10.
+// option), never through pane_title. See CONTRIBUTING.md §10.
 type Pane struct {
 	ID         PaneID
 	MtManaged  string // @mt-managed user option, "" if unset
@@ -60,7 +60,7 @@ type Pane struct {
 //  3. #{pane_current_command}     e.g. "zsh", "claude"
 //  4. #{@mt-managed}              empty if unset
 //
-// Deliberately omits pane_title — see spec-go.md §10/§17 #2.
+// Deliberately omits pane_title — see CONTRIBUTING.md §10/§17 #2.
 const listPanesFormat = "#{pane_id}|#{?pane_active,1,0}|#{pane_current_command}|#{@mt-managed}"
 
 // run executes a tmux command with the given args and returns trimmed
@@ -237,7 +237,7 @@ func SendKeys(id PaneID, keys string) error {
 
 // SetPaneTitle sets the visible pane border title via select-pane -T.
 // This is informational only — agents like Claude Code overwrite it
-// via OSC 2; do not use it for identity (see spec-go.md §10).
+// via OSC 2; do not use it for identity (see CONTRIBUTING.md §10).
 func SetPaneTitle(id PaneID, title string) error {
 	if err := runQuiet("select-pane", "-t", string(id), "-T", title); err != nil {
 		return fmt.Errorf("tmux select-pane -t %s -T: %w", id, err)
@@ -344,7 +344,7 @@ func DisplayPopup(width, height, command string) error {
 // Note: attach is a foreground operation that takes over the terminal;
 // callers that want to keep returning control to the user should only
 // invoke this from the top-level command (never from a goroutine — see
-// spec-go.md §17 #6, which is moot here anyway).
+// CONTRIBUTING.md §17 #6, which is moot here anyway).
 func AttachOrSwitch(target string) error {
 	if InsideTmux() {
 		if err := runQuiet("switch-client", "-t", target); err != nil {

@@ -4,7 +4,7 @@
 #
 # *** FROZEN ***
 # This is the bash prototype. Bug fixes and new features go to the Go
-# implementation (see spec-go.md). Install the Go binary via:
+# implementation (see CONTRIBUTING.md). Install the Go binary via:
 #   curl -fsSL https://raw.githubusercontent.com/jinyuanlu/metatree/master/install.sh | bash
 #
 # This file is preserved as a reference until v2.0.0, when it will be removed.

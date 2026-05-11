@@ -754,7 +754,7 @@ func GitCryptInUse(repo string) bool {
 // Dest:   <repo>/.git/worktrees/<basename(worktreePath)>/git-crypt/keys/default
 //
 // Returns an error if the source key is missing — that's the failure
-// mode spec-go.md §11 calls out for the git-crypt failure chain. The
+// mode CONTRIBUTING.md §11 calls out for the git-crypt failure chain. The
 // caller can decide whether to surface it (lifecycle.go's `mt new` logs
 // it but continues, falling back to the plain `worktree add` path) or
 // abort.
