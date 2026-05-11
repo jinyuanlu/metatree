@@ -298,6 +298,12 @@ ollama_cmd = "ollama run {model}"
 # See §2.6.2 for full semantics.
 worktree_copy_files = [".env", ".envrc", ".npmrc"]
 
+# Where `mt new` branches FROM. "origin-default" fetches the remote
+# default branch (10s timeout) and branches from origin/<default>;
+# "head" reproduces the legacy parent-HEAD behavior; any other string
+# is treated as a literal git ref. See §2.6.3 for full semantics.
+worktree_base = "origin-default"
+
 # When a new worktree contains an .envrc and direnv is on PATH, run
 # `direnv allow` so the agent's pane doesn't see "blocked .envrc" warnings.
 # Set to "false" if you point mt at freshly-cloned third-party repos —
@@ -360,6 +366,74 @@ Duplicates are silently elided, first-occurrence order preserved. Any violation 
 - Hard errors → separate line: `mt: copy errors: .env: permission denied`. Worktree creation still succeeds; the agent still launches.
 
 The feature has no effect on the auth invariant (§1.4) — the copy runs synchronously in the `mt` process before any agent starts.
+
+### 2.6.3 Remote-default-branch base (`worktree_base`)
+
+By default `mt new` branches each new worktree from the latest fetched `origin/<default-branch>`, not from the parent repo's current HEAD. This means a stale `main` checkout doesn't silently produce a stale feature branch: the typical `mt new` starts from whatever just merged into `origin/main`, the same starting point a human would `git checkout -b` from after `git fetch && git switch main && git pull`.
+
+```toml
+# Where `mt new` branches FROM.
+worktree_base = "origin-default"
+```
+
+**Schema.**
+
+- TOML type: string.
+- Default: `"origin-default"`.
+- Valid values:
+  - `"origin-default"`: fetch and branch from `origin/<remote-default>`.
+  - `"head"`: branch from the parent repo's current `HEAD` (legacy behavior, no fetch).
+  - Any other string: treated as a literal git ref (e.g. `"develop"`, `"upstream/main"`, `"v1.2.3"`). No fetch is performed; the ref must already resolve locally.
+
+**Default-branch detection** (used only when `worktree_base = "origin-default"`).
+
+1. `git symbolic-ref refs/remotes/origin/HEAD`: the canonical answer (set by `git clone` and `git remote set-head origin --auto`).
+2. If symbolic-ref is unset or fails, probe `origin/<name>` in order: `main`, `master`, `develop`, `trunk`. First hit wins.
+3. If none of the probes resolve, treat as a hard error (the repo doesn't have a recognizable default branch on `origin`).
+
+**Fetch behavior.**
+
+- Scope: `git fetch origin <default-branch>`, a single-branch fetch, not a full `git fetch origin`. Keeps the cost predictable on large repos.
+- Timeout: 10 seconds, hardcoded in v1. Not configurable.
+- Environment: `GIT_TERMINAL_PROMPT=0` is set on the fetch subprocess so credential prompts fail fast with a non-zero exit instead of hanging forever in a tmux pane the user isn't watching.
+
+**Fallback chain on fetch failure** (any of: network error, auth prompt suppressed, timeout, remote unreachable, branch deleted upstream). Each fallback is announced in the stderr line so the user knows which leg ran:
+
+1. **Stale `origin/<default>`**: if the local refs include `refs/remotes/origin/<default>` from a prior fetch, use it. The branch starts from the last known remote tip, which is usually good enough.
+2. **Local `<default>` HEAD**: if `<default>` exists locally (e.g. `main`), use that ref. The user may have just pulled it manually.
+3. **Parent HEAD**: the legacy starting point. Always available. Last resort.
+
+**Hard error: no `origin` remote.** If `worktree_base = "origin-default"` and the repo has no `origin` remote configured, `mt new` exits 1 with:
+
+```
+mt: worktree_base = "origin-default" but no 'origin' remote in <repo>.
+    Add one (`git remote add origin <url>`), set worktree_base = "head",
+    or set worktree_base = "<some-ref>" for a literal starting point.
+```
+
+This is a fail-fast: the user picked a mode that requires a remote, and there isn't one. Falling back silently to HEAD would hide a misconfiguration.
+
+**Stderr output contract.** Every `mt new` prints exactly one line announcing what it branched from:
+
+```
+mt: branched mt/fix-cookie from origin/main@a1b2c3d
+mt: branched mt/fix-cookie from origin/main@a1b2c3d (stale, fetch failed)
+mt: branched mt/fix-cookie from main@a1b2c3d (no origin/main, used local)
+mt: branched mt/fix-cookie from HEAD@a1b2c3d (fetch failed, no local main)
+```
+
+Format: `mt: branched <branch> from <ref>@<sha8>` with an optional parenthetical reason when a fallback leg ran. The SHA is the resolved commit, truncated to 8 hex characters. This line is mt-internal output, not part of the agent's pane.
+
+**Per-invocation override.** `MT_BASE=head mt new` overrides the config for one invocation. Matches the existing `MT_REPO` / `MT_BRANCH` override pattern; the typical use is stacking a new branch on top of the current feature branch instead of restarting from upstream:
+
+```
+MT_BASE=head mt new           # stack on parent HEAD for this one new worktree
+MT_BASE=feature-x mt new      # stack on a named local branch
+```
+
+Any value valid in the config TOML field is also valid in `MT_BASE`.
+
+**Auth invariant.** The fetch runs synchronously inside `mt`, before any `tmux split-window` and before any `claude` process is launched. `mt` is not in the ancestor chain of the agent (see §1.4). The fetch uses `git`'s own credential handling, exactly as a manual `git fetch origin main` typed at a shell prompt would; `mt` neither reads nor sets credentials.
 
 ### 2.7 Acceptance criteria
 

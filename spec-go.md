@@ -321,6 +321,7 @@ type Config struct {
     ClaudeCmd         string   `toml:"claude_cmd"`
     OllamaCmd         string   `toml:"ollama_cmd"`
     WorktreeCopyFiles []string `toml:"worktree_copy_files"`
+    WorktreeBase      string   `toml:"worktree_base"`
     AutoDirenvAllow   bool     `toml:"auto_direnv_allow"`
     AutoStatusChrome  bool     `toml:"auto_status_chrome"`
 
@@ -353,6 +354,78 @@ Runtime contract (executed in the `mt new` path after `git worktree add` and bef
 - Per-file errors are non-fatal. The batch continues, errors are accumulated into a single `mt: copy errors: …` line on stderr. The happy path is silent or one line; see `spec.md` §2.6.2 for the exact stderr idiom.
 
 Empty list (`worktree_copy_files = []`) is honored as "feature disabled" — distinct from an omitted key, which falls through to the default. Subdirectory paths, shell hooks, and post-create commands are deferred to v2 (`TODOS.md`, `spec.md` §2.11 V2 backlog #4).
+
+### 7.2 `WorktreeBase`: remote-default-branch base
+
+Mirrors `spec.md` §2.6.3. The `Config.WorktreeBase` field (TOML string, default `"origin-default"`) controls which ref each `mt new`-created branch is rooted at. See the product spec for the user-facing contract; this section covers the Go-side primitives that realize it.
+
+Three primitives live in `internal/gitio`:
+
+```go
+package gitio
+
+// DefaultBranch resolves origin's default branch using
+//   git symbolic-ref refs/remotes/origin/HEAD
+// then probing origin/main, origin/master, origin/develop, origin/trunk
+// in order. Returns the bare branch name (e.g. "main"), without the
+// "origin/" prefix. Errors if no candidate resolves AND symbolic-ref
+// is unset, the caller treats that as the no-recognizable-default
+// hard error spelled out in spec.md §2.6.3.
+func DefaultBranch(repo string) (string, error)
+
+// FetchBranch runs `git fetch origin <branch>` with GIT_TERMINAL_PROMPT=0
+// and the supplied timeout. Returns a non-nil error on any non-success
+// (network error, auth required, timeout, branch missing upstream); the
+// caller chooses which fallback leg to take.
+func FetchBranch(repo, branch string, timeout time.Duration) error
+
+// ResolveWorktreeBase encapsulates the full spec.md §2.6.3 decision tree.
+// cfgValue is the post-MT_BASE-override config value ("origin-default",
+// "head", or a literal ref). The returned ResolveResult names the ref
+// actually used, the resolved SHA, and a fallback reason (empty on the
+// happy path).
+func ResolveWorktreeBase(repo, cfgValue string, timeout time.Duration) (ResolveResult, error)
+
+type ResolveResult struct {
+    Ref          string // e.g. "origin/main", "main", "HEAD", or a user-supplied literal
+    SHA          string // full 40-char OID; Format() truncates to 8 for display
+    FallbackNote string // "", "stale, fetch failed", "no origin/main, used local",
+                        // "fetch failed, no local main", etc.
+}
+
+// Format builds the §2.6.3 stderr line:
+//   mt: branched <branchName> from <Ref>@<sha8>[ (<FallbackNote>)]
+func (r ResolveResult) Format(branchName string) string
+```
+
+The existing `WorktreeAdd` signature is extended with an explicit start-point argument so the resolved ref is plumbed through instead of relying on the parent repo's HEAD:
+
+```go
+// WorktreeAdd creates a worktree branched from startPoint. Empty
+// startPoint preserves the legacy semantics (branch from current HEAD)
+// and is what the "head" mode uses. Equivalent to:
+//   git worktree add -b <branchName> <path> <startPoint>
+func WorktreeAdd(repo, branchName, path, startPoint string) error
+```
+
+`internal/command/lifecycle.go` (`RunNew`) becomes the single caller:
+
+1. Read `cfg.WorktreeBase`, override with `MT_BASE` if set.
+2. If the effective value is `"origin-default"` and the repo has no `origin` remote, emit the hard error from spec.md §2.6.3 and exit 1 before any worktree work.
+3. Call `gitio.ResolveWorktreeBase` to pick the ref + take any fallback.
+4. Call `gitio.WorktreeAdd(repo, branch, path, result.Ref)`.
+5. Print `result.Format(branchName)` to stderr.
+6. Continue with `worktree_copy_files`, agent launch, etc.
+
+Test coverage (Tier 1 + Tier 2):
+
+- Unit tests for `DefaultBranch` against a fixture repo with each of the four probe names; assert symbolic-ref wins over probe order.
+- Unit tests for `ResolveWorktreeBase` exercising every leg: happy fetch, stale-ref fallback, local-branch fallback, parent-HEAD fallback, literal ref pass-through, `"head"` short-circuit.
+- Integration test asserting the stderr line is emitted on every `mt new` and matches one of the four documented format variants.
+- Integration test asserting `MT_BASE=head` overrides the config for a single invocation.
+- Integration test asserting the no-`origin` hard-error exits 1 with the documented remediation message.
+
+The auth invariant (§1.4) is unaffected: `ResolveWorktreeBase` runs synchronously inside the `mt` process, before any `tmux split-window`. `mt` exits long before any agent launches.
 
 ### Why we use `BurntSushi/toml`
 

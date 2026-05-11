@@ -72,6 +72,8 @@ Setting `claude_cmd` literally (with all the flags you want) is the recommended 
 
 By default, `mt new` also copies `.env`, `.envrc`, and `.npmrc` from the parent repo into each fresh worktree so it runs out of the box. Customize the list (or set it to `[]` to disable) via `worktree_copy_files` in the config below.
 
+By default, `mt new` also fetches `origin`'s default branch and branches your new worktree from `origin/<default>` (instead of the parent repo's current HEAD). Override to `worktree_base = "head"` to branch from HEAD (the legacy behavior), or set it to any literal ref. Per-invocation: `MT_BASE=head mt new` for stacking workflows.
+
 ## Upgrading
 
 ```sh
@@ -130,6 +132,18 @@ ollama_cmd = "ollama run {model}"
 # Pre-existing destinations and git-crypt-encrypted sources are skipped;
 # writes are atomic (temp file + rename).
 worktree_copy_files = [".env", ".envrc", ".npmrc"]
+
+# Where `mt new` branches FROM. Three modes:
+#   "origin-default"  fetch origin's default branch (main/master/develop/
+#                     trunk via symbolic-ref, 10s timeout) and branch from
+#                     origin/<default>. Falls back through stale origin
+#                     ref → local <default> → parent HEAD on fetch failure.
+#   "head"            branch from the parent repo's current HEAD (legacy).
+#   any other string  treated as a literal git ref (e.g. "develop",
+#                     "upstream/main"). No fetch.
+# Per-invocation override: MT_BASE=head mt new (handy for stacking on a
+# feature branch). See spec.md §2.6.3 for the full contract.
+worktree_base = "origin-default"
 
 # Pre-approve direnv on new worktrees that have an .envrc. Defaults to "true"
 # because the typical mt user creates worktrees of their own repos. Set to
