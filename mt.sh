@@ -27,6 +27,10 @@ MT_CLAUDE_CMD="claude"
 MT_OLLAMA_CMD="ollama run {model}"
 MT_REPOS_DIRS=("$HOME/Code")
 MT_REPOS=()
+# Gitignored runtime files to copy from the parent repo into a fresh worktree
+# so the worktree can actually run. Single-component names only (no
+# subdirectories, no absolute paths) — validated at config-load time.
+MT_WORKTREE_COPY_FILES=(".env" ".envrc" ".npmrc")
 # When a new worktree contains an .envrc and direnv is on PATH, run `direnv
 # allow` so the agent's pane doesn't see the "blocked .envrc" warning.
 # Set to "false" if you point mt at freshly-cloned third-party repos.
@@ -98,8 +102,9 @@ load_config() {
         value="${value/${BASH_REMATCH[0]}/}"
       done
       case "$key" in
-        repos_dirs) MT_REPOS_DIRS=("${items[@]}");;
-        repos)      MT_REPOS=("${items[@]}");;
+        repos_dirs)          MT_REPOS_DIRS=("${items[@]}");;
+        repos)               MT_REPOS=("${items[@]}");;
+        worktree_copy_files) MT_WORKTREE_COPY_FILES=("${items[@]}");;
       esac
     else
       value="${value#\"}"; value="${value%\"}"
@@ -135,6 +140,137 @@ discover_repos() {
     find "$d" -maxdepth 4 -name .git -type d 2>/dev/null \
       | while read -r git_dir; do dirname "$git_dir"; done
   done | sort -u
+}
+
+# Validate MT_WORKTREE_COPY_FILES per spec.md: single-component names only.
+# Dedupes in place, preserving first-occurrence order. Die on any invalid
+# entry — same rules as internal/config/config.go:validateWorktreeCopyFiles.
+validate_worktree_copy_files() {
+  [[ ${#MT_WORKTREE_COPY_FILES[@]} -gt 0 ]] || return 0
+  local name trimmed seen=() out=() already
+  for name in "${MT_WORKTREE_COPY_FILES[@]}"; do
+    # Trim leading/trailing whitespace.
+    trimmed="${name#"${name%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [[ -n "$trimmed" ]] \
+      || die "invalid worktree_copy_files entry: must not be empty or whitespace"
+    [[ "$trimmed" == *".."* ]] \
+      && die "invalid worktree_copy_files entry \"$trimmed\": parent-directory references not allowed"
+    [[ "$trimmed" == /* ]] \
+      && die "invalid worktree_copy_files entry \"$trimmed\": absolute paths not allowed"
+    [[ "$trimmed" == */* ]] \
+      && die "invalid worktree_copy_files entry \"$trimmed\": subdirectory paths not supported in v1, use a single filename"
+    already=0
+    local s
+    for s in "${seen[@]:-}"; do
+      [[ "$s" == "$trimmed" ]] && { already=1; break; }
+    done
+    [[ $already -eq 1 ]] && continue
+    seen+=("$trimmed")
+    out+=("$trimmed")
+  done
+  MT_WORKTREE_COPY_FILES=("${out[@]}")
+}
+
+# Copies entries in MT_WORKTREE_COPY_FILES from $1 (parent repo) to
+# $2 (worktree path). Follows symlinks (cp -Lp), skips git-crypt
+# encrypted sources, skips when dst exists. Atomic via tempfile +
+# mv. Per-file errors are non-fatal; emits a single stderr summary.
+copy_runtime_files() {
+  local src="$1" dst="$2"
+  local name srcPath dstPath tmp
+  local -a copied=() skipped_pairs=() errors_pairs=()
+
+  for name in "${MT_WORKTREE_COPY_FILES[@]}"; do
+    srcPath="$src/$name"
+    # -e is false for a broken symlink; -L is true. Treat both as missing
+    # when neither holds, and as missing when -L but -e is false (dangling).
+    if [[ ! -e "$srcPath" && ! -L "$srcPath" ]]; then
+      skipped_pairs+=("$name=missing"); continue
+    fi
+    if [[ -L "$srcPath" && ! -e "$srcPath" ]]; then
+      skipped_pairs+=("$name=missing"); continue
+    fi
+    # -f follows symlinks, so this catches "symlink to a dir/socket/etc.".
+    if [[ ! -f "$srcPath" ]]; then
+      skipped_pairs+=("$name=not_file"); continue
+    fi
+    if is_git_crypted "$srcPath"; then
+      skipped_pairs+=("$name=encrypted"); continue
+    fi
+    dstPath="$dst/$name"
+    if [[ -e "$dstPath" || -L "$dstPath" ]]; then
+      skipped_pairs+=("$name=dst_exists"); continue
+    fi
+    tmp=$(mktemp "$dst/.mtcopy.XXXXXX" 2>/dev/null) || {
+      errors_pairs+=("$name=mktemp_failed"); continue
+    }
+    # cp -L follows symlinks; -p preserves mode bits (portable on macOS/Linux).
+    if ! cp -Lp "$srcPath" "$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      errors_pairs+=("$name=cp_failed"); continue
+    fi
+    if ! mv "$tmp" "$dstPath" 2>/dev/null; then
+      rm -f "$tmp"
+      errors_pairs+=("$name=rename_failed"); continue
+    fi
+    copied+=("$name")
+  done
+
+  # ---- summary: mirror gitio.CopyReport.Summary() ----
+  local -a non_missing=()
+  local p n r
+  for p in "${skipped_pairs[@]:-}"; do
+    [[ -z "$p" ]] && continue
+    n="${p%%=*}"; r="${p#*=}"
+    [[ "$r" == "missing" ]] && continue
+    non_missing+=("$n $r")
+  done
+
+  local has_copied=0 has_err=0
+  [[ ${#copied[@]} -gt 0 ]] && has_copied=1
+  [[ ${#errors_pairs[@]} -gt 0 ]] && has_err=1
+  if [[ $has_copied -eq 0 && $has_err -eq 0 && ${#non_missing[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  local first second=""
+  if [[ $has_copied -eq 1 ]]; then
+    first="mt: copied $(_mt_join ', ' "${copied[@]}")"
+    if [[ ${#non_missing[@]} -gt 0 ]]; then
+      first+=" (skipped: $(_mt_join ', ' "${non_missing[@]}"))"
+    fi
+  elif [[ ${#non_missing[@]} -gt 0 ]]; then
+    local -a paren=()
+    for n in "${non_missing[@]}"; do
+      paren+=("${n% *} (${n#* })")
+    done
+    first="mt: copy skipped: $(_mt_join ', ' "${paren[@]}")"
+  else
+    first="mt: copy:"
+  fi
+
+  if [[ $has_err -eq 1 ]]; then
+    local -a errparts=()
+    for p in "${errors_pairs[@]}"; do
+      errparts+=("${p%%=*}: ${p#*=}")
+    done
+    second="mt: copy errors: $(_mt_join ', ' "${errparts[@]}")"
+  fi
+
+  printf '%s\n' "$first" >&2
+  [[ -n "$second" ]] && printf '%s\n' "$second" >&2
+  return 0
+}
+
+# Join $2..$N with separator $1. Pure bash, handles empty input.
+_mt_join() {
+  local sep="$1"; shift
+  [[ $# -eq 0 ]] && return 0
+  local out="$1"; shift
+  local x
+  for x in "$@"; do out+="$sep$x"; done
+  printf '%s' "$out"
 }
 
 # pane title: `repo_name:branch`. on basename collision, append -<sha8(repo_path)>.
@@ -293,6 +429,7 @@ CONFIG
   default_backend:  $MT_DEFAULT_BACKEND
   repos_dirs:       ${MT_REPOS_DIRS[*]:-}
   repos:            ${MT_REPOS[*]:-}
+  worktree_copy_files: ${MT_WORKTREE_COPY_FILES[*]:-}
 
 TMUX STATE
   in_tmux:          ${TMUX:+yes (session = $(tmux display-message -p '#{session_name}' 2>/dev/null))}
@@ -567,6 +704,12 @@ cmd_new() {
       git -C "$repo" worktree add -b "$full_branch" "$worktree_path" || exit $?
     fi
 
+    # Auto-copy gitignored runtime files so the new worktree can run.
+    # Non-fatal; the agent launch continues regardless of copy result.
+    if [[ ${#MT_WORKTREE_COPY_FILES[@]} -gt 0 ]]; then
+      copy_runtime_files "$repo" "$worktree_path"
+    fi
+
     # Pre-approve direnv so the agent's pane doesn't see "blocked .envrc".
     # Skipped when: feature disabled, no .envrc, .envrc still encrypted
     # (git-crypt unlock failed or absent), direnv missing, or call fails.
@@ -704,6 +847,7 @@ EOF
 
 main() {
   load_config
+  validate_worktree_copy_files
   # When invoked from inside tmux (e.g. via the prefix+g popup binding),
   # operate on the *calling* session, not whatever the config says. This
   # makes a single binding work across multiple mt sessions (mt, mt-dev,
