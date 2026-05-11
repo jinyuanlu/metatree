@@ -101,8 +101,16 @@ func DiscoverRepos(reposDirs, explicit []string) ([]string, error) {
 	// Resolve + filter the list once. expandTilde is cheap; os.Stat
 	// per dir is one syscall, also cheap. We do this serially because
 	// it's already O(n) where n = number of repos_dirs (typically ≤3).
+	//
+	// Dedup via os.SameFile so two entries that point at the same
+	// physical directory walk only once. This matters on macOS APFS
+	// (case-insensitive), where `["~/Code", "~/code"]` are aliases
+	// for the same inode and would otherwise produce two identical
+	// walks and duplicated picker entries. SameFile is also symlink-
+	// aware, so `["~/Code", "~/symlink-to-Code"]` collapse correctly.
 	type job struct {
 		dir     string
+		info    os.FileInfo
 		matches []string
 		err     error
 	}
@@ -116,7 +124,17 @@ func DiscoverRepos(reposDirs, explicit []string) ([]string, error) {
 			// version silently skips with `[[ -d "$d" ]] || continue`.
 			continue
 		}
-		jobs = append(jobs, &job{dir: d})
+		dup := false
+		for _, prior := range jobs {
+			if os.SameFile(prior.info, fi) {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		jobs = append(jobs, &job{dir: d, info: fi})
 	}
 
 	// Walk each repos_dir in its own goroutine. The walks are entirely
@@ -222,10 +240,17 @@ func findGitDirs(root string, maxDepth int) ([]string, error) {
 			return fs.SkipDir
 		}
 		name := d.Name()
-		if depth > 0 {
-			if _, prune := prunedDirs[name]; prune {
-				return fs.SkipDir
-			}
+		if depth == 0 {
+			// The root is a *container* of repos by contract; we never
+			// short-circuit on it, even if it happens to be `git init`'d.
+			// Otherwise a `~/Code` that someone ran `git init` in (e.g.
+			// for personal notes or an aider tags cache) would hide every
+			// project beneath it. If a single repo really is the target,
+			// that's what `repos = [...]` (the explicit list) is for.
+			return nil
+		}
+		if _, prune := prunedDirs[name]; prune {
+			return fs.SkipDir
 		}
 		// Probe for .git. One os.Stat per visited dir — the dominant cost
 		// of the scan, but unavoidable. We do this BEFORE descending so a

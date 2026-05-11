@@ -522,6 +522,68 @@ func TestDiscoverReposScansReposDirs(t *testing.T) {
 	}
 }
 
+// TestDiscoverReposRootIsItselfAGitRepo guards against the regression
+// where a `repos_dirs` entry that happens to be `git init`'d (e.g. an
+// `~/Code` someone made for personal notes, or an aider tags cache)
+// short-circuits the walk and hides every project below it. The
+// container is treated as a container, not as a repo.
+func TestDiscoverReposRootIsItselfAGitRepo(t *testing.T) {
+	tmp := t.TempDir()
+	scanDir := filepath.Join(tmp, "scan")
+	if err := os.MkdirAll(scanDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", scanDir, err)
+	}
+	// Make the scan root itself a git repo.
+	gitOrFatal(t, scanDir, "init", "-q", "-b", "main")
+	repoA := initRepo(t, scanDir, "repo-a")
+	repoB := initRepo(t, scanDir, "repo-b")
+
+	got, err := DiscoverRepos([]string{scanDir}, nil)
+	if err != nil {
+		t.Fatalf("DiscoverRepos: %v", err)
+	}
+	want := map[string]bool{repoA: true, repoB: true}
+	if len(got) != len(want) {
+		t.Fatalf("DiscoverRepos returned %d entries, want %d (root must be treated as container, not repo): %v",
+			len(got), len(want), got)
+	}
+	for _, r := range got {
+		if !want[r] {
+			t.Errorf("unexpected repo in results (root or other surprise): %s", r)
+		}
+	}
+}
+
+// TestDiscoverReposDedupesAliasedReposDirs guards against the picker
+// showing the same physical directory twice when repos_dirs lists two
+// path forms that resolve to the same inode (case-insensitive APFS,
+// symlinks, …). os.SameFile is the dedup primitive.
+func TestDiscoverReposDedupesAliasedReposDirs(t *testing.T) {
+	tmp := t.TempDir()
+	scanDir := filepath.Join(tmp, "scan")
+	if err := os.MkdirAll(scanDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", scanDir, err)
+	}
+	repoA := initRepo(t, scanDir, "repo-a")
+
+	// Symlink as a portable stand-in for case-insensitive aliasing —
+	// the real Darwin trigger is `~/Code` vs `~/code`, which we can't
+	// reproduce on a case-sensitive test FS, but os.SameFile handles
+	// both via the same FileInfo identity check.
+	alias := filepath.Join(tmp, "scan-alias")
+	if err := os.Symlink(scanDir, alias); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", alias, scanDir, err)
+	}
+
+	got, err := DiscoverRepos([]string{scanDir, alias}, nil)
+	if err != nil {
+		t.Fatalf("DiscoverRepos: %v", err)
+	}
+	if len(got) != 1 || got[0] != repoA {
+		t.Fatalf("DiscoverRepos with aliased repos_dirs = %v, want [%s] (one walk, deduped)", got, repoA)
+	}
+}
+
 // BenchmarkDiscoverReposPrunesNoiseDirs measures DiscoverRepos against a
 // realistic-ish fixture: one repo, with a sibling node_modules tree
 // containing 2,000 directories. Run with:
