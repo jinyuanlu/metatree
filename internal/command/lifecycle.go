@@ -180,7 +180,7 @@ func RunNew(env *Env, args []string) error {
 		if err := tmuxio.SendKeys(first, keys); err != nil {
 			return ExitWith(1, "send-keys: %v", err)
 		}
-		if err := dashboard.MarkPane(first, title); err != nil {
+		if err := dashboard.MarkPane(first, title, startPoint); err != nil {
 			return ExitWith(1, "mark pane: %v", err)
 		}
 	} else {
@@ -204,7 +204,7 @@ func RunNew(env *Env, args []string) error {
 		if err != nil {
 			return ExitWith(1, "split-window: %v", err)
 		}
-		if err := dashboard.MarkPane(newPane, title); err != nil {
+		if err := dashboard.MarkPane(newPane, title, startPoint); err != nil {
 			return ExitWith(1, "mark pane: %v", err)
 		}
 		_ = tmuxio.TileLayout(env.Target())

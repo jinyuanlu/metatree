@@ -505,8 +505,11 @@ _configure_dashboard_chrome() {
   # (bare shells and externally-split panes). pane_current_command shows
   # what's running so you can tell claude / ollama / shell apart at a glance.
   tmux set-window-option -t "$target" pane-border-status top 2>/dev/null || true
+  # `@mt-base` shows the ref the worktree was branched from (e.g. origin/main).
+  # Hidden when unset or equal to HEAD (legacy worktree_base="head" mode — no
+  # informative ref to render).
   tmux set-window-option -t "$target" pane-border-format \
-    '#{?pane_active,#[reverse] , }#{pane_index} #{?@mt-managed,#{@mt-managed},-} (#{pane_current_command})#[default]' \
+    '#{?pane_active,#[reverse] , }#{pane_index} #{?@mt-managed,#{@mt-managed},-}#{?@mt-base,#{?#{==:#{@mt-base},HEAD},, [#{@mt-base}]},} (#{pane_current_command})#[default]' \
     2>/dev/null || true
 
   # Status-right (per-session) — active pane's mt marker, then cwd, then clock.
@@ -531,12 +534,17 @@ find_pane() {
 }
 
 # Mark a pane as mt-managed: visible pane border title (informational, may
-# get overwritten by the agent) AND a stable @mt-managed user option (the
-# real source of truth for mt_pane_count, find_pane, and switch listings).
+# get overwritten by the agent), a stable @mt-managed user option (the real
+# source of truth for mt_pane_count, find_pane, and switch listings), and
+# the @mt-base option (the resolved start-point ref, rendered into the
+# pane border alongside repo:branch). base_ref may be empty.
 mark_pane() {
-  local pane_id="$1" title="$2"
+  local pane_id="$1" title="$2" base_ref="${3:-}"
   tmux select-pane -t "$pane_id" -T "$title" 2>/dev/null || true
   tmux set-option -p -t "$pane_id" '@mt-managed' "$title" 2>/dev/null || true
+  if [[ -n "$base_ref" ]]; then
+    tmux set-option -p -t "$pane_id" '@mt-base' "$base_ref" 2>/dev/null || true
+  fi
 }
 
 attach_dashboard() {
@@ -914,12 +922,12 @@ cmd_new() {
     local first_pane
     first_pane=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" -F '#{pane_id}' | head -1)
     tmux send-keys -t "$first_pane" "cd $worktree_path && exec $cmd" Enter
-    mark_pane "$first_pane" "$title"
+    mark_pane "$first_pane" "$title" "$start_point"
   else
     tmux split-window -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" -c "$worktree_path" "$cmd"
     local new_pane
     new_pane=$(tmux display-message -p -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" '#{pane_id}')
-    mark_pane "$new_pane" "$title"
+    mark_pane "$new_pane" "$title" "$start_point"
     tmux select-layout -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" tiled
   fi
   attach_dashboard

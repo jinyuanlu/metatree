@@ -21,11 +21,21 @@ import (
 // which would otherwise clobber pane_title. See spec-go.md §10.
 const MtManagedKey = "@mt-managed"
 
-// PaneBorderFormat shows the pane index, mt marker, and running command.
-// Active pane reverses colors. The marker falls back to "-" for non-mt panes
-// (bare shells, externally-split panes).
+// MtBaseKey is the per-pane user option mt sets to record which ref the
+// worktree was branched from (e.g. "origin/main", "develop"). Rendered
+// into the pane border so a glance at the dashboard shows base lineage
+// alongside repo:branch.
+const MtBaseKey = "@mt-base"
+
+// PaneBorderFormat shows the pane index, mt marker, optional base-ref, and
+// running command. Active pane reverses colors. The marker falls back to "-"
+// for non-mt panes (bare shells, externally-split panes). The base-ref
+// `[<ref>]` is hidden when @mt-base is unset or equal to "HEAD" (legacy
+// worktree_base = "head" mode — no informative ref to show).
 const paneBorderFormat = `#{?pane_active,#[reverse] , }#{pane_index} ` +
-	`#{?@mt-managed,#{@mt-managed},-} (#{pane_current_command})#[default]`
+	`#{?@mt-managed,#{@mt-managed},-}` +
+	`#{?@mt-base,#{?#{==:#{@mt-base},HEAD},, [#{@mt-base}]},}` +
+	` (#{pane_current_command})#[default]`
 
 // StatusRight shows active pane's mt marker, its cwd (truncated), and time.
 // Refreshes via the status-interval option (set to 2s).
@@ -130,14 +140,22 @@ func InstallBindings(mtPath string) error {
 	return nil
 }
 
-// MarkPane sets both the visible pane border title (informational; may be
-// clobbered by the agent's OSC 2) and the @mt-managed user option (stable
-// source of truth). See spec-go.md §10.
-func MarkPane(id tmuxio.PaneID, title string) error {
+// MarkPane sets the visible pane border title (informational; may be
+// clobbered by the agent's OSC 2), the @mt-managed user option (stable
+// source of truth), and the @mt-base option (the resolved ref the new
+// worktree was branched from, rendered into the pane border). baseRef
+// may be empty for panes created without a resolved base; the option is
+// not set in that case. See spec-go.md §10.
+func MarkPane(id tmuxio.PaneID, title, baseRef string) error {
 	// pane-title for visible border; ignore errors (cosmetic)
 	_ = tmuxio.SetPaneTitle(id, title)
 	if err := tmuxio.SetPaneOption(id, MtManagedKey, title); err != nil {
 		return fmt.Errorf("set %s on %s: %w", MtManagedKey, id, err)
+	}
+	if baseRef != "" {
+		if err := tmuxio.SetPaneOption(id, MtBaseKey, baseRef); err != nil {
+			return fmt.Errorf("set %s on %s: %w", MtBaseKey, id, err)
+		}
 	}
 	return nil
 }
