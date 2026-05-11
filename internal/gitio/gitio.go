@@ -19,6 +19,8 @@ package gitio
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -27,7 +29,18 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
+
+// ErrNoOrigin is returned by DefaultBranch when the repo has no "origin"
+// remote configured at all.
+var ErrNoOrigin = errors.New("no origin remote")
+
+// ErrNoDefaultBranch is returned by DefaultBranch when origin exists but
+// none of the well-known default branch names (main/master/develop/trunk)
+// are present on it.
+var ErrNoDefaultBranch = errors.New("no default branch found on origin")
 
 // Worktree is one entry returned by DiscoverWorktrees.
 //
@@ -583,15 +596,22 @@ func joinSkipsParen(skips []SkipReason) string {
 
 // WorktreeAdd creates a new worktree with a fresh branch.
 //
-// Equivalent to `git -C <repo> worktree add -b <branchName> <path>`.
-func WorktreeAdd(repo, branchName, path string) error {
-	cmd := exec.Command("git", "-C", repo, "worktree", "add",
-		"-b", branchName, path)
+// If startPoint is empty the branch is created from the parent repo's
+// current HEAD (legacy behavior, equivalent to `git -C <repo> worktree
+// add -b <branchName> <path>`). When startPoint is non-empty, the branch
+// is anchored at that ref instead (e.g. "origin/main"); git itself
+// reports unresolved refs.
+func WorktreeAdd(repo, branchName, path, startPoint string) error {
+	args := []string{"-C", repo, "worktree", "add", "-b", branchName, path}
+	if startPoint != "" {
+		args = append(args, startPoint)
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git worktree add -C %s -b %s %s: %w",
-			repo, branchName, path, err)
+		return fmt.Errorf("git worktree add -C %s -b %s %s %s: %w",
+			repo, branchName, path, startPoint, err)
 	}
 	return nil
 }
@@ -604,14 +624,20 @@ func WorktreeAdd(repo, branchName, path string) error {
 // run yet. The caller then copies the git-crypt key into the new GIT_DIR
 // (see InstallGitCryptKey) before running `git checkout HEAD -- .` so
 // the smudge filter finds its key in $GIT_DIR/git-crypt/keys/default.
-func WorktreeAddNoCheckout(repo, branchName, path string) error {
-	cmd := exec.Command("git", "-C", repo, "worktree", "add",
-		"--no-checkout", "-b", branchName, path)
+//
+// startPoint follows the same contract as WorktreeAdd: empty → branch
+// from parent HEAD; non-empty → branch from the explicit ref.
+func WorktreeAddNoCheckout(repo, branchName, path, startPoint string) error {
+	args := []string{"-C", repo, "worktree", "add", "--no-checkout", "-b", branchName, path}
+	if startPoint != "" {
+		args = append(args, startPoint)
+	}
+	cmd := exec.Command("git", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git worktree add --no-checkout -C %s -b %s %s: %w",
-			repo, branchName, path, err)
+		return fmt.Errorf("git worktree add --no-checkout -C %s -b %s %s %s: %w",
+			repo, branchName, path, startPoint, err)
 	}
 	return nil
 }
@@ -773,4 +799,223 @@ func copyFile(src, dst string, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+// ResolveResult carries the outcome of ResolveWorktreeBase.
+type ResolveResult struct {
+	Ref          string
+	Sha8         string
+	FellBackFrom string
+	Reason       string
+}
+
+// Format returns the user-visible stderr line for branchName.
+func (r ResolveResult) Format(branchName string) string {
+	if r.FellBackFrom == "" {
+		return fmt.Sprintf("mt: branched %s from %s@%s", branchName, r.Ref, r.Sha8)
+	}
+	return fmt.Sprintf("mt: branched %s from %s@%s (%s)", branchName, r.Ref, r.Sha8, r.Reason)
+}
+
+// defaultBranchCandidates is the ordered probe list when origin/HEAD is
+// unset. Matches the names git itself defaults to across major hosts.
+var defaultBranchCandidates = []string{"main", "master", "develop", "trunk"}
+
+// DefaultBranch returns the name of the remote default branch for repo.
+func DefaultBranch(repo string) (string, error) {
+	if !hasOriginRemote(repo) {
+		return "", ErrNoOrigin
+	}
+	cmd := exec.Command("git", "-C", repo, "symbolic-ref", "--short",
+		"refs/remotes/origin/HEAD")
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = nil
+	if err := cmd.Run(); err == nil {
+		name := strings.TrimSpace(stdout.String())
+		if strings.HasPrefix(name, "origin/") {
+			return strings.TrimPrefix(name, "origin/"), nil
+		}
+		if name != "" {
+			return name, nil
+		}
+	}
+	for _, c := range defaultBranchCandidates {
+		if remoteRefExists(repo, "refs/remotes/origin/"+c) {
+			return c, nil
+		}
+	}
+	return "", ErrNoDefaultBranch
+}
+
+func hasOriginRemote(repo string) bool {
+	cmd := exec.Command("git", "-C", repo, "remote", "get-url", "origin")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
+func remoteRefExists(repo, ref string) bool {
+	cmd := exec.Command("git", "-C", repo, "rev-parse", "--verify", "--quiet", ref)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
+// FetchBranch runs `git fetch origin <branch>` with a timeout.
+//
+// GIT_TERMINAL_PROMPT=0 prevents git from blocking on a credential prompt
+// inside the tmux pane mt runs in — without it, a missing credential helper
+// would hang invisibly until the user notices.
+//
+// The fetch process is put in its own process group so a deadline-driven
+// kill can take down the whole git/curl tree, not just the top-level
+// `git fetch`. Without that, a hung TCP connect inside git-remote-https
+// keeps running long after the parent dies.
+func FetchBranch(repo, branch string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "fetch", "origin", branch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	cmd.WaitDelay = 500 * time.Millisecond
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("git fetch origin %s: timed out after %s", branch, timeout)
+		}
+		return fmt.Errorf("git fetch origin %s: %w (%s)", branch, err,
+			strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// ResolveWorktreeBase computes the start-point ref for a new worktree.
+//
+// See the package doc on the function in the spec for the full contract:
+//   - "head" or "" → HEAD, no fetch
+//   - "origin-default" → fetch + fall back through stale ref / local
+//     branch / parent HEAD on failure
+//   - anything else → literal ref, no fetch
+func ResolveWorktreeBase(repo, cfgValue string, timeout time.Duration) (ResolveResult, error) {
+	switch cfgValue {
+	case "", "head":
+		sha, err := revParseShort(repo, "HEAD")
+		if err != nil {
+			return ResolveResult{}, err
+		}
+		return ResolveResult{Ref: "HEAD", Sha8: sha}, nil
+
+	case "origin-default":
+		def, err := DefaultBranch(repo)
+		if err != nil {
+			if errors.Is(err, ErrNoOrigin) {
+				return ResolveResult{}, fmt.Errorf(
+					"cannot resolve worktree base %q — repo %s has no %q remote. "+
+						"Fix: either add one (git remote add origin <url>) "+
+						"or set worktree_base = %q in ~/.metatree/config.toml",
+					"origin-default", repo, "origin", "head")
+			}
+			return ResolveResult{}, fmt.Errorf("default branch for %s: %w", repo, err)
+		}
+		return resolveOriginDefault(repo, def, timeout), nil
+
+	default:
+		sha, err := revParseShort(repo, cfgValue)
+		if err != nil {
+			return ResolveResult{Ref: cfgValue}, nil
+		}
+		return ResolveResult{Ref: cfgValue, Sha8: sha}, nil
+	}
+}
+
+// resolveOriginDefault walks the fallback ladder for "origin-default":
+// fetch → stale origin/<def> → local <def> → parent HEAD. Each rung
+// populates FellBackFrom/Reason so the caller can surface the deviation.
+func resolveOriginDefault(repo, def string, timeout time.Duration) ResolveResult {
+	originRef := "origin/" + def
+	fetchErr := FetchBranch(repo, def, timeout)
+	if fetchErr == nil {
+		if sha, err := revParseShort(repo, originRef); err == nil {
+			return ResolveResult{Ref: originRef, Sha8: sha}
+		}
+	}
+
+	reasonHint := fetchReasonHint(fetchErr)
+
+	if sha, err := revParseShort(repo, originRef); err == nil {
+		return ResolveResult{
+			Ref:          originRef,
+			Sha8:         sha,
+			FellBackFrom: "origin-default",
+			Reason:       "stale: " + reasonHint,
+		}
+	}
+	if sha, err := revParseShort(repo, def); err == nil {
+		return ResolveResult{
+			Ref:          def,
+			Sha8:         sha,
+			FellBackFrom: "origin-default",
+			Reason:       fmt.Sprintf("offline, no %s — used local %s", originRef, def),
+		}
+	}
+	sha, _ := revParseShort(repo, "HEAD")
+	return ResolveResult{
+		Ref:          "HEAD",
+		Sha8:         sha,
+		FellBackFrom: "origin-default",
+		Reason:       "last-resort fallback to parent HEAD",
+	}
+}
+
+func fetchReasonHint(err error) string {
+	if err == nil {
+		return "fetch ok but ref not present"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "timed out"):
+		return "fetch timed out"
+	case strings.Contains(msg, "Could not resolve host"),
+		strings.Contains(msg, "could not resolve host"),
+		strings.Contains(msg, "Network is unreachable"):
+		return "offline"
+	default:
+		return "fetch failed"
+	}
+}
+
+// setProcessGroup ensures the child runs in its own process group so the
+// whole tree (git + git-remote-https + curl) can be killed together when
+// the context fires. macOS and Linux both honor Setpgid.
+func setProcessGroup(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.Setpgid = true
+}
+
+func killProcessGroup(cmd *exec.Cmd) error {
+	if cmd.Process == nil {
+		return os.ErrProcessDone
+	}
+	// Negative PID = "send to whole process group" for syscall.Kill.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		return cmd.Process.Kill()
+	}
+	return nil
+}
+
+func revParseShort(repo, ref string) (string, error) {
+	cmd := exec.Command("git", "-C", repo, "rev-parse", "--short=8", ref)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git rev-parse --short=8 %s: %w (%s)",
+			ref, err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }

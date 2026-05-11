@@ -34,6 +34,7 @@ type Config struct {
 	ClaudeCmd         string   `toml:"claude_cmd"`
 	OllamaCmd         string   `toml:"ollama_cmd"`
 	WorktreeCopyFiles []string `toml:"worktree_copy_files"`
+	WorktreeBase      string   `toml:"worktree_base"`
 	AutoDirenvAllow   flexBool `toml:"auto_direnv_allow"`
 	AutoStatusChrome  flexBool `toml:"auto_status_chrome"`
 
@@ -119,6 +120,7 @@ func Default() *Config {
 		ClaudeCmd:         "claude",
 		OllamaCmd:         "ollama run {model}",
 		WorktreeCopyFiles: []string{".env", ".envrc", ".npmrc"},
+		WorktreeBase:      "origin-default",
 		AutoDirenvAllow:   true,
 		AutoStatusChrome:  true,
 	}
@@ -249,7 +251,18 @@ func Load() (*Config, error) {
 	}
 	cfg.WorktreeCopyFiles = deduped
 
+	if err := validateWorktreeBase(cfg.WorktreeBase); err != nil {
+		return nil, fmt.Errorf("config %s: %w", "validate", err)
+	}
+
 	return cfg, nil
+}
+
+func validateWorktreeBase(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return errors.New(`invalid worktree_base: must not be empty (use "head" to disable, "origin-default" for the default behavior, or a literal git ref)`)
+	}
+	return nil
 }
 
 func validateWorktreeCopyFiles(names []string) ([]string, error) {

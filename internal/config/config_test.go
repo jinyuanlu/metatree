@@ -431,6 +431,7 @@ auto_status_chrome = "false"
 		ClaudeCmd:         "claude --foo",
 		OllamaCmd:         "ollama serve {model}",
 		WorktreeCopyFiles: []string{".env", ".envrc", ".npmrc"},
+		WorktreeBase:      "origin-default",
 		AutoDirenvAllow:   false,
 		AutoStatusChrome:  false,
 		Path:              path,
@@ -591,6 +592,96 @@ func TestLoad_WorktreeCopyFiles_EmptyArray(t *testing.T) {
 	}
 	if reflect.DeepEqual(cfg.WorktreeCopyFiles, Default().WorktreeCopyFiles) {
 		t.Errorf("explicit empty array should differ from Default() value; got %v", cfg.WorktreeCopyFiles)
+	}
+}
+
+func TestDefault_WorktreeBase(t *testing.T) {
+	if got := Default().WorktreeBase; got != "origin-default" {
+		t.Errorf("Default().WorktreeBase = %q, want %q", got, "origin-default")
+	}
+}
+
+func TestLoad_WorktreeBase_HappyPath(t *testing.T) {
+	path := writeConfig(t, `worktree_base = "head"`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorktreeBase != "head" {
+		t.Errorf("WorktreeBase = %q, want %q", cfg.WorktreeBase, "head")
+	}
+}
+
+func TestLoad_WorktreeBase_LiteralRef(t *testing.T) {
+	path := writeConfig(t, `worktree_base = "develop"`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorktreeBase != "develop" {
+		t.Errorf("WorktreeBase = %q, want %q", cfg.WorktreeBase, "develop")
+	}
+}
+
+func TestLoad_WorktreeBase_OriginDefault(t *testing.T) {
+	path := writeConfig(t, `worktree_base = "origin-default"`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorktreeBase != "origin-default" {
+		t.Errorf("WorktreeBase = %q, want %q", cfg.WorktreeBase, "origin-default")
+	}
+}
+
+func TestLoad_WorktreeBase_RejectsEmptyString(t *testing.T) {
+	path := writeConfig(t, `worktree_base = ""`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with empty worktree_base should error")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("error %q missing 'must not be empty'", err.Error())
+	}
+}
+
+func TestLoad_WorktreeBase_RejectsWhitespace(t *testing.T) {
+	path := writeConfig(t, `worktree_base = "   "`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with whitespace-only worktree_base should error")
+	}
+}
+
+func TestLoad_WorktreeBase_AbsentFieldKeepsDefault(t *testing.T) {
+	path := writeConfig(t, `tmux_session = "alt"`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorktreeBase != "origin-default" {
+		t.Errorf("WorktreeBase = %q, want %q (Default() value)", cfg.WorktreeBase, "origin-default")
+	}
+}
+
+func TestLoad_WorktreeBase_TypeMismatch(t *testing.T) {
+	path := writeConfig(t, `worktree_base = ["head"]`+"\n")
+	withConfigEnv(t, path)
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() with array worktree_base should error")
 	}
 }
 

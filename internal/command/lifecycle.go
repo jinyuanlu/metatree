@@ -231,7 +231,7 @@ func ensureWorktree(repo, fullBranch, worktreePath string) error {
 
 	if gitio.GitCryptInUse(repo) {
 		// --no-checkout, copy key, checkout. Per spec-go.md §11.
-		if err := gitio.WorktreeAddNoCheckout(repo, fullBranch, worktreePath); err != nil {
+		if err := gitio.WorktreeAddNoCheckout(repo, fullBranch, worktreePath, ""); err != nil {
 			return ExitWith(1, "%v", err)
 		}
 		if err := gitio.InstallGitCryptKey(repo, worktreePath); err != nil {
@@ -250,7 +250,7 @@ func ensureWorktree(repo, fullBranch, worktreePath string) error {
 		return nil
 	}
 
-	if err := gitio.WorktreeAdd(repo, fullBranch, worktreePath); err != nil {
+	if err := gitio.WorktreeAdd(repo, fullBranch, worktreePath, ""); err != nil {
 		return ExitWith(1, "%v", err)
 	}
 	return nil
