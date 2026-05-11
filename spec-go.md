@@ -41,9 +41,11 @@ The bash prototype proved the design; the Go port hardens the implementation.
 - TUI framework, custom rendering, or any escape from spec.md §1.2 ("tmux is
   the entire UI"). Same auth invariant from §1.4 — Go implementation does
   not change the credentials posture.
-- Compatibility with bash mt.sh as a runtime peer. The Go binary replaces it.
-  `mt.sh` is preserved in the repo as a reference implementation only,
-  marked deprecated, removed in v2.0.0.
+- Bug-for-bug compatibility with bash mt.sh at runtime. The Go binary is
+  the production implementation that users install; `mt.sh` is maintained
+  in lockstep as the bash reference implementation, at the behavior level
+  (not bug-for-bug) for spec parity and cross-implementation regression
+  testing via the bash smoke suite.
 - Any new product feature. The port ships at strict feature parity with the
   bash version. New features go in v2.x after the port lands.
 
@@ -150,9 +152,8 @@ metatree/
 ├── tests/
 │   ├── smoke.sh                     # carried over from bash, runs against Go binary
 │   ├── mt.bats                      # carried over, optional
+│   ├── bats/                        # bash-only behaviors (e.g. copy_runtime_files)
 │   └── integration_test.go          # Go-level integration tests (real tmux)
-├── docs/
-│   └── porting-from-bash.md         # one-time porting log, removed in v2.0
 ├── .github/
 │   └── workflows/
 │       └── release.yml              # goreleaser on tag
@@ -160,7 +161,7 @@ metatree/
 ├── go.mod
 ├── go.sum
 ├── install.sh                       # rewritten to fetch binary
-├── mt.sh                            # bash reference impl, deprecated
+├── mt.sh                            # bash reference impl, maintained in lockstep
 ├── spec.md                          # product spec
 ├── spec-go.md                       # this file
 ├── Justfile
@@ -823,6 +824,13 @@ formula automatically once we add a `homebrew_tap` repo.
 
 ## 16. Migration plan
 
+> **Status: completed.** The Go port shipped as v1.0 following the plan
+> below. The "freeze `mt.sh`" policy in commit 0 was subsequently relaxed:
+> `mt.sh` is now maintained in lockstep with the Go binary as a parallel
+> reference implementation. See §19 for the current versioning posture and
+> §1 (Non-goals) for the updated parity contract. The table below is
+> preserved as historical record of the port itself.
+
 Eight commits, each shipping a verifiable artifact.
 
 | Commit | What ships | Verifiable by |
@@ -927,10 +935,10 @@ prototype."
 
 | Version | Marker                                                         |
 | ------- | -------------------------------------------------------------- |
-| v1.0.0  | Go binary at feature parity with bash mt.sh. mt.sh deprecated. |
+| v1.0.0  | Go binary at feature parity with bash mt.sh; both maintained in lockstep. |
 | v1.1.0  | Homebrew tap.                                                  |
 | v1.2.0  | First post-port feature (TBD; not pre-committed).              |
-| v2.0.0  | mt.sh removed from repo. Distribution is binary-only.          |
+| v2.0.0  | TBD — original "remove mt.sh" plan superseded by lockstep maintenance (see §16 note). |
 
 `spec.md` and `spec-go.md` get updated together. Breaking changes to either
 require a major version bump.

@@ -240,12 +240,13 @@ The Ollama backend has no analog: local model servers have no shared credentials
 
 ## Spec
 
-Two documents:
+Three documents:
 
 - **[`spec.md`](spec.md)** — the **product** spec. Commands, behaviors, acceptance criteria, the auth invariant (§1.4), the dashboard topology (§2.5), the failure-modes table (§2.8). This is the source of truth for what `mt` does.
 - **[`spec-go.md`](spec-go.md)** — the **Go implementation** spec. Package layout, error handling, testing strategy, distribution, anti-patterns. Reading this before contributing code is faster than reading the code.
+- **[`TODOS.md`](TODOS.md)** — deferred work and v2 candidates with the design context captured (so future-you doesn't re-derive it from scratch).
 
-The current `mt.sh` is the bash prototype, kept in the repo for reference and frozen at commit `6889905`. The Go port is the active implementation as of v1.0. `mt.sh` is removed in v2.0. Both specs stay aligned; if they diverge, the product spec wins.
+`mt.sh` is the bash reference implementation, maintained in lockstep with the Go binary. The Go port is the production implementation users install as of v1.0; `mt.sh` exists as an executable spec for cross-implementation regression testing and as a second source-of-truth for behavior. Both specs stay aligned; if they diverge, the product spec wins.
 
 ## What you see on the dashboard
 
@@ -294,7 +295,7 @@ just              # list recipes
 just build        # go build -o ./bin/mt-go ./cmd/mt
 just test-go      # Go unit + integration tests with -race
 just lint         # gofmt + go vet
-just test         # bash smoke (still tests the frozen mt.sh — kept for reference)
+just test         # bash smoke (tests mt.sh, the bash reference implementation)
 ```
 
 Without `just`:
@@ -306,13 +307,16 @@ go test -race ./...
 # Build the binary
 go build -o ./bin/mt-go ./cmd/mt
 
-# Bash smoke (frozen mt.sh — still passes; kept until v2.0)
+# Bash smoke (cross-implementation regression against mt.sh)
 bash tests/smoke.sh
+
+# Bats tests for mt.sh-specific helpers (requires bats-core: brew install bats-core)
+bats tests/bats/
 ```
 
 The Go test suite covers four layers: `internal/config` (TOML schema, defaults), `internal/mtlog` (invocation log), `internal/tmuxio` (tmux wrappers, real fixtures), `internal/gitio` (worktree discovery, real git fixtures), plus `tests/integration_test.go` driving the built binary end-to-end. CI runs `gofmt -l`, `go vet`, `go test -race ./...`, the smoke against the Go binary, and an auth-invariant grep on every push and PR. See [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
-`tests/smoke.sh` (19 sections) is the executable specification — preserved verbatim from the bash era as the cross-implementation regression suite.
+`tests/smoke.sh` (19 sections) is the executable specification, run against both implementations as the cross-implementation regression suite. `tests/bats/` covers bash-only behaviors not exercised by smoke (e.g. `mt.sh`'s `copy_runtime_files` helper).
 
 ## License
 

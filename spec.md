@@ -5,8 +5,9 @@
 > This document defines the **product**: commands, behaviors, acceptance
 > criteria, invariants. For the **Go implementation** (package layout,
 > error handling, testing, distribution), see [`spec-go.md`](spec-go.md).
-> The Go version is the source of truth from v1.0 onward; the bash prototype
-> at `mt.sh` is preserved as a reference implementation and is deprecated.
+> The Go binary is the production implementation from v1.0 onward; `mt.sh`
+> is maintained in lockstep as the bash reference implementation, used as
+> an executable spec for cross-implementation regression testing.
 
 A control-plane CLI for spawning agent sessions (Claude Code or Ollama) in fresh git worktrees, presented as a single-window tmux dashboard so multiple repos are visible and operable on one page.
 
