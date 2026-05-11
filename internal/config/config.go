@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -30,10 +31,11 @@ type Config struct {
 	WorktreeSubdir   string   `toml:"worktree_subdir"`
 	DefaultBackend   string   `toml:"default_backend"`
 	OllamaModel      string   `toml:"ollama_model"`
-	ClaudeCmd        string   `toml:"claude_cmd"`
-	OllamaCmd        string   `toml:"ollama_cmd"`
-	AutoDirenvAllow  flexBool `toml:"auto_direnv_allow"`
-	AutoStatusChrome flexBool `toml:"auto_status_chrome"`
+	ClaudeCmd         string   `toml:"claude_cmd"`
+	OllamaCmd         string   `toml:"ollama_cmd"`
+	WorktreeCopyFiles []string `toml:"worktree_copy_files"`
+	AutoDirenvAllow   flexBool `toml:"auto_direnv_allow"`
+	AutoStatusChrome  flexBool `toml:"auto_status_chrome"`
 
 	Path string `toml:"-"`
 }
@@ -114,10 +116,11 @@ func Default() *Config {
 		WorktreeSubdir:   ".worktrees",
 		DefaultBackend:   "claude",
 		OllamaModel:      "llama3:8b",
-		ClaudeCmd:        "claude",
-		OllamaCmd:        "ollama run {model}",
-		AutoDirenvAllow:  true,
-		AutoStatusChrome: true,
+		ClaudeCmd:         "claude",
+		OllamaCmd:         "ollama run {model}",
+		WorktreeCopyFiles: []string{".env", ".envrc", ".npmrc"},
+		AutoDirenvAllow:   true,
+		AutoStatusChrome:  true,
 	}
 }
 
@@ -239,5 +242,41 @@ func Load() (*Config, error) {
 	if _, err := toml.DecodeFile(path, cfg); err != nil {
 		return nil, fmt.Errorf("config %s: %w", "decode", err)
 	}
+
+	deduped, err := validateWorktreeCopyFiles(cfg.WorktreeCopyFiles)
+	if err != nil {
+		return nil, fmt.Errorf("config %s: %w", "validate", err)
+	}
+	cfg.WorktreeCopyFiles = deduped
+
 	return cfg, nil
+}
+
+func validateWorktreeCopyFiles(names []string) ([]string, error) {
+	if names == nil {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return nil, errors.New("invalid worktree_copy_files entry: must not be empty or whitespace")
+		}
+		if strings.Contains(trimmed, "..") {
+			return nil, fmt.Errorf("invalid worktree_copy_files entry %q: parent-directory references not allowed", trimmed)
+		}
+		if filepath.IsAbs(trimmed) {
+			return nil, fmt.Errorf("invalid worktree_copy_files entry %q: absolute paths not allowed", trimmed)
+		}
+		if strings.ContainsRune(trimmed, '/') || strings.ContainsRune(trimmed, filepath.Separator) {
+			return nil, fmt.Errorf("invalid worktree_copy_files entry %q: subdirectory paths not supported in v1, use a single filename", trimmed)
+		}
+		if _, dup := seen[trimmed]; dup {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out, nil
 }

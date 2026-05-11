@@ -584,6 +584,287 @@ func TestDiscoverReposDedupesAliasedReposDirs(t *testing.T) {
 	}
 }
 
+// ----------------------------------------------------------------------
+// CopyRuntimeFiles
+// ----------------------------------------------------------------------
+
+func TestCopyRuntimeFiles_HappyPath(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	payload := []byte("DB_URL=local")
+	if err := os.WriteFile(filepath.Join(src, ".env"), payload, 0o640); err != nil {
+		t.Fatalf("write src/.env: %v", err)
+	}
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Errors) != 0 || len(r.Skipped) != 0 {
+		t.Fatalf("unexpected errors/skipped: %#v", r)
+	}
+	if len(r.Copied) != 1 || r.Copied[0] != ".env" {
+		t.Fatalf("Copied = %v, want [.env]", r.Copied)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dst, ".env"))
+	if err != nil {
+		t.Fatalf("read dst/.env: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("dst contents = %q, want %q", got, payload)
+	}
+	fi, err := os.Stat(filepath.Join(dst, ".env"))
+	if err != nil {
+		t.Fatalf("stat dst/.env: %v", err)
+	}
+	if fi.Mode().Perm() != 0o640 {
+		t.Fatalf("dst mode = %o, want 0640", fi.Mode().Perm())
+	}
+}
+
+func TestCopyRuntimeFiles_MissingSource(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Copied) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("unexpected copied/errors: %#v", r)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Reason != "missing" || r.Skipped[0].Name != ".env" {
+		t.Fatalf("Skipped = %#v, want [{.env missing}]", r.Skipped)
+	}
+}
+
+func TestCopyRuntimeFiles_Symlink(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src")
+	dst := filepath.Join(tmp, "dst")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+	target := filepath.Join(tmp, "secrets.env")
+	payload := []byte("SECRET=42")
+	if err := os.WriteFile(target, payload, 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(src, ".env")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Errors) != 0 || len(r.Skipped) != 0 {
+		t.Fatalf("unexpected: %#v", r)
+	}
+	if len(r.Copied) != 1 {
+		t.Fatalf("Copied = %v, want [.env]", r.Copied)
+	}
+
+	fi, err := os.Lstat(filepath.Join(dst, ".env"))
+	if err != nil {
+		t.Fatalf("lstat dst/.env: %v", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("dst/.env is a symlink; want regular file")
+	}
+	got, err := os.ReadFile(filepath.Join(dst, ".env"))
+	if err != nil {
+		t.Fatalf("read dst/.env: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("dst = %q, want %q", got, payload)
+	}
+}
+
+func TestCopyRuntimeFiles_BrokenSymlink(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.Symlink("/nonexistent/path/that/does/not/exist", filepath.Join(src, ".env")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Copied) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("unexpected: %#v", r)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Reason != "missing" {
+		t.Fatalf("Skipped = %#v, want [{.env missing}]", r.Skipped)
+	}
+}
+
+func TestCopyRuntimeFiles_NotRegularFile(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, ".env"), 0o755); err != nil {
+		t.Fatalf("mkdir src/.env: %v", err)
+	}
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Copied) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("unexpected: %#v", r)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Reason != "not_file" {
+		t.Fatalf("Skipped = %#v, want [{.env not_file}]", r.Skipped)
+	}
+}
+
+func TestCopyRuntimeFiles_GitCryptEncrypted(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	payload := append([]byte{0x00, 'G', 'I', 'T', 'C', 'R', 'Y', 'P', 'T', 0x00},
+		[]byte("ciphertext-bytes")...)
+	if err := os.WriteFile(filepath.Join(src, ".env"), payload, 0o600); err != nil {
+		t.Fatalf("write src/.env: %v", err)
+	}
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Copied) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("unexpected: %#v", r)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Reason != "encrypted" {
+		t.Fatalf("Skipped = %#v, want [{.env encrypted}]", r.Skipped)
+	}
+}
+
+func TestCopyRuntimeFiles_DstExists(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, ".env"), []byte("NEW"), 0o600); err != nil {
+		t.Fatalf("write src/.env: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, ".env"), []byte("OLD"), 0o600); err != nil {
+		t.Fatalf("write dst/.env: %v", err)
+	}
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Copied) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("unexpected: %#v", r)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Reason != "dst_exists" {
+		t.Fatalf("Skipped = %#v, want [{.env dst_exists}]", r.Skipped)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, ".env"))
+	if err != nil {
+		t.Fatalf("read dst/.env: %v", err)
+	}
+	if !bytes.Equal(got, []byte("OLD")) {
+		t.Fatalf("dst contents clobbered: %q", got)
+	}
+}
+
+func TestCopyRuntimeFiles_EmptyNames(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+
+	r := CopyRuntimeFiles(src, dst, nil)
+	if len(r.Copied) != 0 || len(r.Skipped) != 0 || len(r.Errors) != 0 {
+		t.Fatalf("expected empty report, got %#v", r)
+	}
+}
+
+func TestCopyRuntimeFiles_AtomicOnFailure(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, ".env"), []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write src/.env: %v", err)
+	}
+	if err := os.Chmod(dst, 0o500); err != nil {
+		t.Fatalf("chmod dst ro: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dst, 0o755) })
+
+	r := CopyRuntimeFiles(src, dst, []string{".env"})
+	if len(r.Errors) != 1 || r.Errors[0].Name != ".env" {
+		t.Fatalf("Errors = %#v, want one for .env", r.Errors)
+	}
+
+	if err := os.Chmod(dst, 0o755); err != nil {
+		t.Fatalf("chmod dst back: %v", err)
+	}
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatalf("readdir dst: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".mtcopy.") {
+			t.Fatalf("leftover tempfile in dst: %s", e.Name())
+		}
+	}
+}
+
+func TestCopyReport_Summary_Nothing(t *testing.T) {
+	if got := (CopyReport{}).Summary(); got != "" {
+		t.Fatalf("Summary on empty report = %q, want \"\"", got)
+	}
+}
+
+func TestCopyReport_Summary_AllMissing(t *testing.T) {
+	r := CopyReport{Skipped: []SkipReason{{".env", "missing"}}}
+	if got := r.Summary(); got != "" {
+		t.Fatalf("Summary all-missing = %q, want \"\"", got)
+	}
+}
+
+func TestCopyReport_Summary_CopiedOnly(t *testing.T) {
+	r := CopyReport{Copied: []string{".env"}}
+	got := r.Summary()
+	if !strings.HasPrefix(got, "mt: copied ") {
+		t.Fatalf("Summary copied-only = %q, want prefix \"mt: copied \"", got)
+	}
+	if !strings.Contains(got, ".env") {
+		t.Fatalf("Summary = %q, missing .env", got)
+	}
+}
+
+func TestCopyReport_Summary_SkippedEncrypted(t *testing.T) {
+	r := CopyReport{Skipped: []SkipReason{{".envrc", "encrypted"}}}
+	got := r.Summary()
+	if got == "" {
+		t.Fatalf("Summary skipped-encrypted = \"\", want non-empty")
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("Summary = %q, want single line", got)
+	}
+	if !strings.Contains(got, "encrypted") || !strings.Contains(got, ".envrc") {
+		t.Fatalf("Summary = %q, missing 'encrypted' or '.envrc'", got)
+	}
+}
+
+func TestCopyReport_Summary_CopiedPlusSkipped(t *testing.T) {
+	r := CopyReport{
+		Copied:  []string{".env"},
+		Skipped: []SkipReason{{".envrc", "encrypted"}},
+	}
+	got := r.Summary()
+	if strings.Contains(got, "\n") {
+		t.Fatalf("Summary = %q, want single line", got)
+	}
+	if !strings.Contains(got, ".env") {
+		t.Fatalf("Summary = %q, missing .env", got)
+	}
+	if !strings.Contains(got, ".envrc encrypted") {
+		t.Fatalf("Summary = %q, missing '.envrc encrypted'", got)
+	}
+}
+
+func TestCopyReport_Summary_WithErrors(t *testing.T) {
+	r := CopyReport{
+		Copied: []string{".env"},
+		Errors: []CopyError{{".npmrc", fmt.Errorf("permission denied")}},
+	}
+	got := r.Summary()
+	lines := strings.Split(got, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("Summary = %q, want two lines", got)
+	}
+	if !strings.Contains(lines[0], ".env") || !strings.Contains(lines[0], "copied") {
+		t.Fatalf("first line = %q, missing .env or copied", lines[0])
+	}
+	if !strings.Contains(lines[1], ".npmrc") || !strings.Contains(lines[1], "errors") {
+		t.Fatalf("second line = %q, missing .npmrc or errors", lines[1])
+	}
+}
+
 // BenchmarkDiscoverReposPrunesNoiseDirs measures DiscoverRepos against a
 // realistic-ish fixture: one repo, with a sibling node_modules tree
 // containing 2,000 directories. Run with:

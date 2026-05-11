@@ -420,19 +420,20 @@ auto_status_chrome = "false"
 		t.Fatalf("Load: %v", err)
 	}
 	want := &Config{
-		ReposDirs:        []string{"/a", "/b"},
-		Repos:            []string{"/c"},
-		TmuxSession:      "ts",
-		TmuxWindow:       "tw",
-		BranchPrefix:     "bp",
-		WorktreeSubdir:   ".wt",
-		DefaultBackend:   "ollama",
-		OllamaModel:      "phi3",
-		ClaudeCmd:        "claude --foo",
-		OllamaCmd:        "ollama serve {model}",
-		AutoDirenvAllow:  false,
-		AutoStatusChrome: false,
-		Path:             path,
+		ReposDirs:         []string{"/a", "/b"},
+		Repos:             []string{"/c"},
+		TmuxSession:       "ts",
+		TmuxWindow:        "tw",
+		BranchPrefix:      "bp",
+		WorktreeSubdir:    ".wt",
+		DefaultBackend:    "ollama",
+		OllamaModel:       "phi3",
+		ClaudeCmd:         "claude --foo",
+		OllamaCmd:         "ollama serve {model}",
+		WorktreeCopyFiles: []string{".env", ".envrc", ".npmrc"},
+		AutoDirenvAllow:   false,
+		AutoStatusChrome:  false,
+		Path:              path,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load full config:\n got  %+v\n want %+v", cfg, want)
@@ -476,6 +477,120 @@ func TestFlexBoolUnmarshalDirect(t *testing.T) {
 				t.Errorf("UnmarshalTOML(%v) = %v, want %v", tc.input, bool(b), tc.want)
 			}
 		})
+	}
+}
+
+func TestDefault_WorktreeCopyFiles(t *testing.T) {
+	got := Default().WorktreeCopyFiles
+	want := []string{".env", ".envrc", ".npmrc"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Default().WorktreeCopyFiles = %v, want %v", got, want)
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_HappyPath(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = [".env", ".secret"]`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{".env", ".secret"}
+	if !reflect.DeepEqual(cfg.WorktreeCopyFiles, want) {
+		t.Errorf("WorktreeCopyFiles = %v, want %v", cfg.WorktreeCopyFiles, want)
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_RejectsAbsolutePath(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = ["/etc/passwd"]`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with absolute path should error")
+	}
+	if !strings.Contains(err.Error(), "absolute paths not allowed") {
+		t.Errorf("error %q missing 'absolute paths not allowed'", err.Error())
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_RejectsParentEscape(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = ["../foo"]`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with parent escape should error")
+	}
+	if !strings.Contains(err.Error(), "parent-directory references") {
+		t.Errorf("error %q missing 'parent-directory references'", err.Error())
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_RejectsSubdirPath(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = ["config/local.env"]`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with subdir path should error")
+	}
+	if !strings.Contains(err.Error(), "subdirectory paths not supported") {
+		t.Errorf("error %q missing 'subdirectory paths not supported'", err.Error())
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_RejectsEmptyString(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = [""]`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with empty string should error")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Errorf("error %q missing 'must not be empty'", err.Error())
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_RejectsWhitespace(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = ["   "]`+"\n")
+	withConfigEnv(t, path)
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() with whitespace-only entry should error")
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_Deduplicates(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = [".env", ".env", ".env"]`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{".env"}
+	if !reflect.DeepEqual(cfg.WorktreeCopyFiles, want) {
+		t.Errorf("WorktreeCopyFiles = %v, want %v", cfg.WorktreeCopyFiles, want)
+	}
+}
+
+func TestLoad_WorktreeCopyFiles_EmptyArray(t *testing.T) {
+	path := writeConfig(t, `worktree_copy_files = []`+"\n")
+	withConfigEnv(t, path)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.WorktreeCopyFiles) != 0 {
+		t.Errorf("WorktreeCopyFiles = %v, want empty", cfg.WorktreeCopyFiles)
+	}
+	if reflect.DeepEqual(cfg.WorktreeCopyFiles, Default().WorktreeCopyFiles) {
+		t.Errorf("explicit empty array should differ from Default() value; got %v", cfg.WorktreeCopyFiles)
 	}
 }
 

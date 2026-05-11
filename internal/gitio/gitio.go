@@ -413,6 +413,174 @@ func ParentRepoOf(worktreePath string) (string, error) {
 	return resolved, nil
 }
 
+type SkipReason struct {
+	Name   string
+	Reason string
+}
+
+type CopyError struct {
+	Name string
+	Err  error
+}
+
+type CopyReport struct {
+	Copied  []string
+	Skipped []SkipReason
+	Errors  []CopyError
+}
+
+// CopyRuntimeFiles copies the named files from src to dst. Single-component
+// names only (caller validates). Follows symlinks; output is always a
+// regular file. Skips missing, non-regular-file, git-crypt-encrypted, and
+// pre-existing destination paths. Writes are atomic temp+rename; per-file
+// errors are recorded and the batch continues.
+func CopyRuntimeFiles(src, dst string, names []string) CopyReport {
+	var r CopyReport
+	for _, name := range names {
+		copyOne(src, dst, name, &r)
+	}
+	return r
+}
+
+func copyOne(src, dst, name string, r *CopyReport) {
+	srcPath := filepath.Join(src, name)
+	fi, err := os.Lstat(srcPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			r.Skipped = append(r.Skipped, SkipReason{name, "missing"})
+			return
+		}
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(srcPath)
+		if err != nil {
+			r.Skipped = append(r.Skipped, SkipReason{name, "missing"})
+			return
+		}
+		srcPath = resolved
+		fi, err = os.Stat(srcPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				r.Skipped = append(r.Skipped, SkipReason{name, "missing"})
+				return
+			}
+			r.Errors = append(r.Errors, CopyError{name, err})
+			return
+		}
+	}
+	if !fi.Mode().IsRegular() {
+		r.Skipped = append(r.Skipped, SkipReason{name, "not_file"})
+		return
+	}
+	if IsGitCryptEncrypted(srcPath) {
+		r.Skipped = append(r.Skipped, SkipReason{name, "encrypted"})
+		return
+	}
+
+	dstPath := filepath.Join(dst, name)
+	if _, err := os.Stat(dstPath); err == nil {
+		r.Skipped = append(r.Skipped, SkipReason{name, "dst_exists"})
+		return
+	} else if !os.IsNotExist(err) {
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+
+	in, err := os.Open(srcPath)
+	if err != nil {
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	defer in.Close()
+
+	tmp, err := os.CreateTemp(dst, ".mtcopy.*")
+	if err != nil {
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	if err := tmp.Chmod(fi.Mode().Perm()); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		_ = os.Remove(tmpPath)
+		r.Errors = append(r.Errors, CopyError{name, err})
+		return
+	}
+	r.Copied = append(r.Copied, name)
+}
+
+// Summary returns the user-facing one-or-two-line summary, or "" when
+// nothing notable happened (zero copied, zero errors, every skip is
+// "missing").
+func (r CopyReport) Summary() string {
+	var nonMissing []SkipReason
+	for _, s := range r.Skipped {
+		if s.Reason != "missing" {
+			nonMissing = append(nonMissing, s)
+		}
+	}
+	copied := len(r.Copied) > 0
+	hasErr := len(r.Errors) > 0
+	if !copied && !hasErr && len(nonMissing) == 0 {
+		return ""
+	}
+
+	var first string
+	switch {
+	case copied:
+		first = "mt: copied " + strings.Join(r.Copied, ", ")
+		if len(nonMissing) > 0 {
+			first += " (skipped: " + joinSkips(nonMissing) + ")"
+		}
+	case len(nonMissing) > 0:
+		first = "mt: copy skipped: " + joinSkipsParen(nonMissing)
+	default:
+		first = "mt: copy:"
+	}
+
+	if !hasErr {
+		return first
+	}
+	parts := make([]string, 0, len(r.Errors))
+	for _, e := range r.Errors {
+		parts = append(parts, fmt.Sprintf("%s: %v", e.Name, e.Err))
+	}
+	return first + "\nmt: copy errors: " + strings.Join(parts, ", ")
+}
+
+func joinSkips(skips []SkipReason) string {
+	parts := make([]string, 0, len(skips))
+	for _, s := range skips {
+		parts = append(parts, s.Name+" "+s.Reason)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func joinSkipsParen(skips []SkipReason) string {
+	parts := make([]string, 0, len(skips))
+	for _, s := range skips {
+		parts = append(parts, s.Name+" ("+s.Reason+")")
+	}
+	return strings.Join(parts, ", ")
+}
+
 // WorktreeAdd creates a new worktree with a fresh branch.
 //
 // Equivalent to `git -C <repo> worktree add -b <branchName> <path>`.
