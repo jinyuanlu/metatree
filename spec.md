@@ -190,7 +190,7 @@ V1 will NOT include any of the following. They are deferred to later versions or
 - Sandboxing (Docker, Lima, etc.)
 - Auto-merge on CI pass
 - Built-in token / cost tracking
-- Hooks for `post_create`, `.env` copying, dependency installation
+- Arbitrary `post_create` shell hooks, dependency installation (`npm install`, `mise install`). Bounded gitignored-file copy is in scope (see §2.6.2); free-form hook execution is not
 - Backends other than Claude Code and Ollama (no Codex, Aider, Gemini, Cursor)
 - Mouse-driven UI, custom keybindings, status-line modifications, themes
 - Any terminal feature beyond ANSI default (no truecolor requirement, no Sixel, no Kitty graphics)
@@ -291,6 +291,12 @@ ollama_model = "llama3:8b"
 claude_cmd = "claude"
 ollama_cmd = "ollama run {model}"
 
+# Gitignored runtime files copied from the parent repo into each new
+# worktree so it runs out of the box. Root-only filenames in v1
+# (no subdirs, no .., no absolute paths); empty list disables the copy.
+# See §2.6.2 for full semantics.
+worktree_copy_files = [".env", ".envrc", ".npmrc"]
+
 # When a new worktree contains an .envrc and direnv is on PATH, run
 # `direnv allow` so the agent's pane doesn't see "blocked .envrc" warnings.
 # Set to "false" if you point mt at freshly-cloned third-party repos —
@@ -310,6 +316,49 @@ The wrap is **only applied** when `$SHELL` resolves (via `filepath.Base`) to `ba
 **The wrap MUST NOT prefix the inner command with `exec`.** In both bash and zsh, `exec <name>` is a special-builtin form that does not perform alias expansion on its argument — using it defeats the entire reason this contract exists. The `-c` shell exits with the inner command's status when it finishes, so the pane still closes when the agent exits without needing `exec`.
 
 This contract preserves §1.4 (auth invariant): `mt ∉ ancestors(claude)` because `mt` exited long before `claude` started, and `parent(claude)` is the interactive login shell of the pane — observationally identical to `cd <repo> && claude` typed at a shell prompt.
+
+### 2.6.2 Gitignored runtime file copy (`worktree_copy_files`)
+
+A fresh worktree shares its parent repo's tracked content but not the gitignored runtime files the project needs to actually run (`.env`, `.envrc`, `.npmrc`, etc.). `mt new` copies a configured list of such files from the parent repo into each new worktree so the worktree is runnable immediately.
+
+```toml
+# Gitignored runtime files copied from the parent repo into each new
+# worktree. Empty list ([]) disables the feature.
+worktree_copy_files = [".env", ".envrc", ".npmrc"]
+```
+
+**Schema.**
+
+- TOML type: array of strings.
+- Default: `[".env", ".envrc", ".npmrc"]`.
+- Empty array (`worktree_copy_files = []`) is honored as "feature disabled". Omitted key falls through to the default.
+
+**Validation (at config load).** Each entry must satisfy all of:
+
+- Non-empty after `TrimSpace` (no `""`, no whitespace-only entries).
+- Contains no `/` (subdirectory paths are reserved for a later version; see `TODOS.md`).
+- Contains no `..` (parent-directory escapes forbidden).
+- Is not absolute (`filepath.IsAbs` must be false).
+
+Duplicates are silently elided, first-occurrence order preserved. Any violation is a fatal config error wrapped as `config validate: invalid worktree_copy_files entry …`; `mt` exits 1 before any worktree is touched.
+
+**Runtime behavior (per entry, executed after `git worktree add` and before the agent launches).**
+
+- **Source missing in parent repo** — silent skip. The typical project doesn't have all three defaults; that's fine.
+- **Source is a symlink** — resolved before copy (`cp -L` semantics). The worktree receives the underlying file, not a dangling link into the parent.
+- **Source is git-crypt-encrypted** — skip, recorded for the summary line. Copying the encrypted bytes would be useless and confusing.
+- **Destination already exists** — skip (no overwrite). Re-running `mt new` on the same `(repo, branch)` is idempotent on this axis: a hand-edited `.env` in an existing worktree is never clobbered.
+- **Write atomicity** — each file is written to a temp file in the destination directory and then `rename`d into place, so an interrupted `mt new` cannot leave a half-written `.env`.
+- **Per-file errors are non-fatal** — the batch continues, errors are accumulated.
+
+**Stderr summary.** One-line idiom matching `mt`'s "quiet by default" stance:
+
+- Nothing copied, nothing skipped → silent.
+- Happy path → one line: `mt: copied .env, .envrc into worktree`.
+- Skips worth surfacing (git-crypt, pre-existing destinations) → folded into the same line: `mt: copied .env; skipped .envrc (git-crypt), .npmrc (exists)`.
+- Hard errors → separate line: `mt: copy errors: .env: permission denied`. Worktree creation still succeeds; the agent still launches.
+
+The feature has no effect on the auth invariant (§1.4) — the copy runs synchronously in the `mt` process before any agent starts.
 
 ### 2.7 Acceptance criteria
 
@@ -376,7 +425,7 @@ In rough priority order:
 1. Persistent worktree registry across machines, synced as a flat file (Tailscale + Syncthing or dotfiles repo).
 2. Spillover window when pane count exceeds N.
 3. Detection of stale worktrees (upstream branch merged or deleted, no commits in N days).
-4. `post_create` hook for `.env` copy / `npm install` / `mise install`.
+4. `worktree_post_create` shell hook (`npm install` / `mise install` / `pnpm install --offline` / `ln -s ../node_modules .`). The bounded `.env` copy already ships in v1 via `worktree_copy_files` (§2.6.2); the hook is the free-form escalation for users who need to run commands, with the trust and timeout caveats spelled out in `TODOS.md`.
 5. Go rewrite if `mt.sh` crosses 250 lines.
 6. Per-pane status decoration (idle / running / awaiting input) — only if expressible via `pane_title` updates the agent itself emits. No polling.
 

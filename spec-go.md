@@ -309,24 +309,26 @@ Same TOML schema as bash spec §2.6 — schema is a contract, untouched.
 package config
 
 type Config struct {
-    ReposDirs        []string  `toml:"repos_dirs"`
-    Repos            []string  `toml:"repos"`
-    TmuxSession      string    `toml:"tmux_session"`
-    TmuxWindow       string    `toml:"tmux_window"`
-    BranchPrefix     string    `toml:"branch_prefix"`
-    WorktreeSubdir   string    `toml:"worktree_subdir"`
-    DefaultBackend   string    `toml:"default_backend"`
-    OllamaModel      string    `toml:"ollama_model"`
-    ClaudeCmd        string    `toml:"claude_cmd"`
-    OllamaCmd        string    `toml:"ollama_cmd"`
-    AutoDirenvAllow  bool      `toml:"auto_direnv_allow"`
-    AutoStatusChrome bool      `toml:"auto_status_chrome"`
+    ReposDirs         []string `toml:"repos_dirs"`
+    Repos             []string `toml:"repos"`
+    TmuxSession       string   `toml:"tmux_session"`
+    TmuxWindow        string   `toml:"tmux_window"`
+    BranchPrefix      string   `toml:"branch_prefix"`
+    WorktreeSubdir    string   `toml:"worktree_subdir"`
+    DefaultBackend    string   `toml:"default_backend"`
+    OllamaModel       string   `toml:"ollama_model"`
+    ClaudeCmd         string   `toml:"claude_cmd"`
+    OllamaCmd         string   `toml:"ollama_cmd"`
+    WorktreeCopyFiles []string `toml:"worktree_copy_files"`
+    AutoDirenvAllow   bool     `toml:"auto_direnv_allow"`
+    AutoStatusChrome  bool     `toml:"auto_status_chrome"`
 
     Path string `toml:"-"`  // resolved config path (informational)
 }
 
 func Default() *Config       // returns config with all defaults populated
-func Load() (*Config, error) // overlays file (if any) onto Default
+func Load() (*Config, error) // overlays file (if any) onto Default; runs
+                              // validateWorktreeCopyFiles before returning
 ```
 
 - Bool fields accept TOML strings (`"true"`/`"false"`) for backwards-compat
@@ -335,6 +337,21 @@ func Load() (*Config, error) // overlays file (if any) onto Default
   string form. Test the hybrid in `config_test.go`.
 - A missing config file is not an error — defaults win.
 - `MT_CONFIG` env var overrides the path. Same behavior as bash.
+
+### 7.1 `WorktreeCopyFiles` — gitignored runtime file copy
+
+Mirrors `spec.md` §2.6.2. Default: `[".env", ".envrc", ".npmrc"]`. The list tells `mt new` which gitignored runtime files to copy from the parent repo into each fresh worktree so the worktree runs out of the box without manual setup.
+
+Validation lives in `validateWorktreeCopyFiles` (called from `Load` after TOML decode). Each entry must be non-empty post-`TrimSpace`, must not contain `/` or `..`, and must not be absolute (`filepath.IsAbs == false`). Duplicates are silently dropped, first-occurrence order preserved. The list is normative at runtime: nothing further is parsed or interpreted, the strings are joined directly to `Repo.Path` and to the destination worktree directory.
+
+Runtime contract (executed in the `mt new` path after `git worktree add` and before the agent launches):
+
+- Source missing → silent skip. Source-is-symlink → resolved via `cp -L` semantics. Source-is-git-crypt-encrypted → skip, recorded for the summary.
+- Destination exists → skip, recorded. The copy never overwrites a hand-edited file.
+- Each write is `<dst>.tmp` followed by `os.Rename` so an interrupted `mt new` leaves no half-file.
+- Per-file errors are non-fatal. The batch continues, errors are accumulated into a single `mt: copy errors: …` line on stderr. The happy path is silent or one line; see `spec.md` §2.6.2 for the exact stderr idiom.
+
+Empty list (`worktree_copy_files = []`) is honored as "feature disabled" — distinct from an omitted key, which falls through to the default. Subdirectory paths, shell hooks, and post-create commands are deferred to v2 (`TODOS.md`, `spec.md` §2.11 V2 backlog #4).
 
 ### Why we use `BurntSushi/toml`
 

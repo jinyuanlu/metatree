@@ -70,6 +70,8 @@ mt setup --reset          # forget current; rewrite from defaults
 
 Setting `claude_cmd` literally (with all the flags you want) is the recommended way to load MCP — no shell aliases, no surprises.
 
+By default, `mt new` also copies `.env`, `.envrc`, and `.npmrc` from the parent repo into each fresh worktree so it runs out of the box. Customize the list (or set it to `[]` to disable) via `worktree_copy_files` in the config below.
+
 ## Upgrading
 
 ```sh
@@ -121,6 +123,13 @@ ollama_model    = "llama3:8b"
 # command templates (overridable; defaults just work)
 claude_cmd = "claude"
 ollama_cmd = "ollama run {model}"
+
+# Gitignored runtime files copied from the parent repo into each new
+# worktree, so the worktree runs out of the box. Root-only filenames
+# in v1 (no subdirs, no .., no absolute paths). Set to [] to disable.
+# Pre-existing destinations and git-crypt-encrypted sources are skipped;
+# writes are atomic (temp file + rename).
+worktree_copy_files = [".env", ".envrc", ".npmrc"]
 
 # Pre-approve direnv on new worktrees that have an .envrc. Defaults to "true"
 # because the typical mt user creates worktrees of their own repos. Set to
