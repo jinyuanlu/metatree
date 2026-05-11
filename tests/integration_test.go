@@ -112,6 +112,7 @@ default_backend = "claude"
 claude_cmd = "cat"
 auto_direnv_allow = false
 auto_status_chrome = false
+worktree_base = "head"
 `, repo))
 
 	t.Cleanup(func() {
@@ -279,6 +280,7 @@ default_backend = "claude"
 claude_cmd = "cat"
 auto_direnv_allow = false
 auto_status_chrome = false
+worktree_base = "head"
 worktree_copy_files = [".env"]
 `, f.repoPath))
 
@@ -306,6 +308,94 @@ worktree_copy_files = [".env"]
 	}
 	if !bytes.Equal(copied, envContent) {
 		t.Errorf("worktree .env contents mismatch:\n got:  %q\n want: %q", copied, envContent)
+	}
+}
+
+// TestIntegration_NewWorktreeBranchesFromOriginDefault — end-to-end proof
+// that worktree_base = "origin-default" causes `mt new` to fetch and branch
+// from the REMOTE tip, not the parent's stale local main.
+func TestIntegration_NewWorktreeBranchesFromOriginDefault(t *testing.T) {
+	f := setup(t)
+
+	// Bare remote one dir up from the parent so it's discoverable but not
+	// itself a candidate for repo scanning.
+	bare := filepath.Join(f.tmp, "remote.git")
+	mustRun(t, "", "git", "init", "--bare", "-q", "-b", "main", bare)
+
+	// Wire the parent repo to the bare remote and push the existing main.
+	mustRun(t, f.repoPath, "git", "remote", "add", "origin", bare)
+	mustRun(t, f.repoPath, "git", "push", "-q", "-u", "origin", "main")
+
+	// Add a SECOND commit on the bare's main via a scratch clone, so the
+	// bare's main is now one commit AHEAD of f.repoPath's local main.
+	scratch := filepath.Join(f.tmp, "scratch")
+	mustRun(t, "", "git", "clone", "-q", bare, scratch)
+	mustRun(t, scratch, "git", "config", "user.email", "remote@example.invalid")
+	mustRun(t, scratch, "git", "config", "user.name", "remote-test")
+	mustRun(t, scratch, "git", "config", "commit.gpgsign", "false")
+	mustWrite(t, filepath.Join(scratch, "REMOTE-ADDED"), "from-remote\n")
+	mustRun(t, scratch, "git", "add", "REMOTE-ADDED")
+	mustRun(t, scratch, "git", "commit", "-q", "-m", "second commit on remote")
+	mustRun(t, scratch, "git", "push", "-q", "origin", "main")
+
+	// Capture the bare's tip sha for the assertion.
+	tipBytes, err := exec.Command("git", "-C", bare, "rev-parse", "main").Output()
+	if err != nil {
+		t.Fatalf("rev-parse bare main: %v", err)
+	}
+	wantTip := strings.TrimSpace(string(tipBytes))
+
+	// Sanity: f.repoPath's local main must NOT yet equal the bare tip
+	// (otherwise the test would trivially pass via the wrong code path).
+	localBytes, err := exec.Command("git", "-C", f.repoPath, "rev-parse", "main").Output()
+	if err != nil {
+		t.Fatalf("rev-parse local main: %v", err)
+	}
+	if strings.TrimSpace(string(localBytes)) == wantTip {
+		t.Fatal("test setup broken: local main already equals bare tip — fetch can't be proven")
+	}
+
+	// Rewrite the fixture config: worktree_base = origin-default.
+	mustWrite(t, f.configPath, fmt.Sprintf(`repos = ["%s"]
+tmux_session = "mt-itest"
+tmux_window = "dashboard"
+branch_prefix = "itest"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "cat"
+auto_direnv_allow = false
+auto_status_chrome = false
+worktree_base = "origin-default"
+`, f.repoPath))
+
+	cmd := exec.Command(f.mtBin, "new", "--with", "claude")
+	cmd.Env = append(os.Environ(),
+		"MT_CONFIG="+f.configPath,
+		"TMUX_TMPDIR="+f.tmuxSock,
+		"TMUX=",
+		"MT_REPO="+f.repoPath,
+		"MT_BRANCH=fromremote",
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_ = cmd.Run() // tmux attach exits non-zero in CI; side effects are what we verify.
+
+	// Worktree HEAD must equal the bare tip — proves the fetch landed.
+	wtPath := filepath.Join(f.repoPath, ".worktrees", "fromremote")
+	gotBytes, err := exec.Command("git", "-C", wtPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse worktree HEAD: %v (stderr: %s)", err, stderr.String())
+	}
+	got := strings.TrimSpace(string(gotBytes))
+	if got != wantTip {
+		t.Errorf("worktree HEAD mismatch:\n got:  %s\n want: %s (bare tip)\nstderr:\n%s",
+			got, wantTip, stderr.String())
+	}
+
+	// Stderr must announce origin/main as the source.
+	wantLine := "mt: branched itest/fromremote from origin/main@"
+	if !strings.Contains(stderr.String(), wantLine) {
+		t.Errorf("stderr missing %q:\n%s", wantLine, stderr.String())
 	}
 }
 
@@ -468,6 +558,7 @@ default_backend = "claude"
 claude_cmd = "claude"
 auto_direnv_allow = false
 auto_status_chrome = false
+worktree_base = "head"
 `, f.repoPath))
 
 	runMtNew("first")

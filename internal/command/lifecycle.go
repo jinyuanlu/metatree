@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jinyuanlu/metatree/internal/dashboard"
 	"github.com/jinyuanlu/metatree/internal/gitio"
@@ -108,9 +109,14 @@ func RunNew(env *Env, args []string) error {
 		return tmuxio.AttachOrSwitch(env.Target())
 	}
 
+	startPoint, err := resolveWorktreeBase(env, repo, fullBranch)
+	if err != nil {
+		return err
+	}
+
 	// Worktree creation. Reuse if path exists AND is git-registered;
 	// otherwise add fresh. Git-crypt repos need the --no-checkout dance.
-	if err := ensureWorktree(repo, fullBranch, worktreePath); err != nil {
+	if err := ensureWorktree(repo, fullBranch, worktreePath, startPoint); err != nil {
 		return err
 	}
 
@@ -209,8 +215,8 @@ func RunNew(env *Env, args []string) error {
 
 // ensureWorktree creates the worktree if it doesn't exist; reuses if it does
 // AND git knows about it. Handles git-crypt repos via the --no-checkout
-// pattern.
-func ensureWorktree(repo, fullBranch, worktreePath string) error {
+// pattern. startPoint is the resolved ref to branch from ("" = parent HEAD).
+func ensureWorktree(repo, fullBranch, worktreePath, startPoint string) error {
 	if fileExists(worktreePath) {
 		// Verify git knows about this path (resolve symlinks both sides)
 		resolved, err := filepath.EvalSymlinks(worktreePath)
@@ -231,7 +237,7 @@ func ensureWorktree(repo, fullBranch, worktreePath string) error {
 
 	if gitio.GitCryptInUse(repo) {
 		// --no-checkout, copy key, checkout. Per spec-go.md §11.
-		if err := gitio.WorktreeAddNoCheckout(repo, fullBranch, worktreePath, ""); err != nil {
+		if err := gitio.WorktreeAddNoCheckout(repo, fullBranch, worktreePath, startPoint); err != nil {
 			return ExitWith(1, "%v", err)
 		}
 		if err := gitio.InstallGitCryptKey(repo, worktreePath); err != nil {
@@ -250,7 +256,7 @@ func ensureWorktree(repo, fullBranch, worktreePath string) error {
 		return nil
 	}
 
-	if err := gitio.WorktreeAdd(repo, fullBranch, worktreePath, ""); err != nil {
+	if err := gitio.WorktreeAdd(repo, fullBranch, worktreePath, startPoint); err != nil {
 		return ExitWith(1, "%v", err)
 	}
 	return nil
@@ -458,6 +464,24 @@ func RunPrune(env *Env, args []string) error {
 	}
 	fmt.Fprintf(env.Stdout, "\n%d removed, %d skipped\n", removed, skipped)
 	return nil
+}
+
+// resolveWorktreeBase determines the start-point ref for a new worktree
+// and prints the "mt: branched <branch> from <ref>@<sha>" summary to
+// env.Stderr. MT_BASE wins over env.Config.WorktreeBase. Extracted from
+// RunNew so the wire-up is unit-testable without tmux + dashboard.
+func resolveWorktreeBase(env *Env, repo, fullBranch string) (string, error) {
+	const fetchTimeout = 10 * time.Second
+	effective := env.Config.WorktreeBase
+	if v := envGet("MT_BASE"); v != "" {
+		effective = v
+	}
+	rpt, err := gitio.ResolveWorktreeBase(repo, effective, fetchTimeout)
+	if err != nil {
+		return "", ExitWith(1, "%v", err)
+	}
+	fmt.Fprintln(env.Stderr, rpt.Format(fullBranch))
+	return rpt.Ref, nil
 }
 
 // copyRuntimeFiles runs the worktree_copy_files step and prints any
