@@ -2,6 +2,8 @@
 
 A control-plane CLI that spawns Claude Code or Ollama sessions in fresh git worktrees, presented as a single tiled tmux dashboard so multiple repos are visible and operable on one page. Single static Go binary, no daemon, no TUI, no install dance.
 
+![mt new in action — pick repo, name branch, fresh worktree branched from origin/main, agent launches](demo.gif)
+
 ```
 ┌─────────────────────┬───────────────────────┐
 │ acme-api:fix-cookie │ bytemark-web:pr-fixes │
@@ -10,6 +12,8 @@ A control-plane CLI that spawns Claude Code or Ollama sessions in fresh git work
 │ sideproject:llama-spike  (ollama, idle)     │
 └─────────────────────────────────────────────┘
 ```
+
+> Re-record the demo with `./demo/record.sh` (requires [vhs](https://github.com/charmbracelet/vhs)). The script in `demo/record.sh` sets up a throwaway fixture repo + fake agent and runs `vhs demo/demo.tape`.
 
 ## The aha
 
