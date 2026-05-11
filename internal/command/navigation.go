@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jinyuanlu/metatree/internal/dashboard"
@@ -73,14 +74,52 @@ func classifyBackend(cmd string) string {
 	}
 }
 
-// RunSwitch shows a fzf popup of live mt-managed panes plus a "+ Create
-// new" entry, focuses the chosen pane (and zooms with -z). Dead worktrees
-// are deliberately excluded (per spec.md / the bash port's commit e57ceca).
+// buildSwitchRows produces the live → dead → new ordering for RunSwitch's
+// fzf picker. Pure so it can be unit-tested without tmux. Dead rows are
+// derived from worktrees not bound to any live pane; the main worktree
+// of each repo (Path == Repo) is excluded — it's the repo itself, not an
+// mt-spawned tree.
+func buildSwitchRows(managed []tmuxio.Pane, wts []gitio.Worktree) []switchRow {
+	liveTitles := make(map[string]struct{}, len(managed))
+	rows := make([]switchRow, 0, len(managed)+len(wts)+1)
+	for _, p := range managed {
+		liveTitles[p.MtManaged] = struct{}{}
+		rows = append(rows, switchRow{title: p.MtManaged, marker: "live", paneID: p.ID})
+	}
+	for _, wt := range wts {
+		if wt.Path == wt.Repo {
+			continue
+		}
+		repoName := filepath.Base(wt.Repo)
+		branch := filepath.Base(wt.Path)
+		title := repoName + ":" + branch
+		if _, live := liveTitles[title]; live {
+			continue
+		}
+		rows = append(rows, switchRow{title: title, marker: "dead", repo: wt.Repo, branch: branch})
+	}
+	rows = append(rows, switchRow{title: "+ Create new worktree...", marker: "new"})
+	return rows
+}
+
+// switchRow is one entry in the fzf picker built by RunSwitch.
+type switchRow struct {
+	title  string
+	marker string // "live" | "dead" | "new"
+	paneID tmuxio.PaneID
+	repo   string // dead only
+	branch string // dead only
+}
+
+// RunSwitch shows a fzf popup of every worktree mt could land you in:
+// first the live mt-managed panes, then dead worktrees (git-known but no
+// pane bound), then a "+ Create new" entry. Picking live focuses the
+// pane; picking dead respawns the configured agent in the existing
+// worktree (via MT_REPO+MT_BRANCH into RunNew); picking new runs the
+// interactive cmd_new. -z / --zoom zooms after live selection.
 //
-// Layout in fzf:
-//
-//	<title>                  [live]  <pane_id>
-//	+ Create new worktree... [new ]  <NEW>
+// Live is shown first because it's the high-signal case — your active
+// agents stay at the top even when there are many stale worktrees.
 func RunSwitch(env *Env, args []string) error {
 	zoom := false
 	for _, a := range args {
@@ -103,12 +142,15 @@ func RunSwitch(env *Env, args []string) error {
 		return ExitWith(1, "list managed panes: %v", err)
 	}
 
-	// Build fzf input. Each row is "<display>|<marker>|<key>".
+	wts, _ := gitio.DiscoverWorktrees(env.Config.ReposDirs, env.Config.Repos)
+	rows := buildSwitchRows(managed, wts)
+
+	// fzf carries only "<title>|<marker>|<row-index>" through the pipe;
+	// we keep the rich row data in memory and look it up by index after.
 	var lines []string
-	for _, p := range managed {
-		lines = append(lines, fmt.Sprintf("%s|live|%s", p.MtManaged, p.ID))
+	for i, r := range rows {
+		lines = append(lines, fmt.Sprintf("%s|%s|%d", r.title, r.marker, i))
 	}
-	lines = append(lines, "+ Create new worktree...|new|<NEW>")
 
 	choice, err := fzfPick(strings.Join(lines, "\n"), "switch> ")
 	if err != nil {
@@ -126,23 +168,50 @@ func RunSwitch(env *Env, args []string) error {
 	if len(parts) < 3 {
 		return ExitWith(1, "could not parse fzf selection: %s", choice)
 	}
-	marker, key := parts[1], parts[2]
+	idx, err := strconv.Atoi(parts[2])
+	if err != nil || idx < 0 || idx >= len(rows) {
+		return ExitWith(1, "bad switch row index: %s", parts[2])
+	}
+	chosen := rows[idx]
 
-	switch marker {
+	switch chosen.marker {
 	case "live":
-		paneID := tmuxio.PaneID(key)
-		if err := tmuxio.SelectPane(paneID); err != nil {
+		if err := tmuxio.SelectPane(chosen.paneID); err != nil {
 			return ExitWith(1, "select pane: %v", err)
 		}
 		if zoom {
-			_ = tmuxio.ZoomPane(paneID)
+			_ = tmuxio.ZoomPane(chosen.paneID)
 		}
 		return tmuxio.AttachOrSwitch(env.Target())
+	case "dead":
+		// Respawn: MT_REPO + MT_BRANCH skip both fzf prompts in RunNew,
+		// and the existing-worktree branch in ensureWorktree reuses the
+		// directory without re-fetching from origin.
+		prevRepo, hadRepo := os.LookupEnv("MT_REPO")
+		prevBranch, hadBranch := os.LookupEnv("MT_BRANCH")
+		defer func() {
+			if hadRepo {
+				_ = os.Setenv("MT_REPO", prevRepo)
+			} else {
+				_ = os.Unsetenv("MT_REPO")
+			}
+			if hadBranch {
+				_ = os.Setenv("MT_BRANCH", prevBranch)
+			} else {
+				_ = os.Unsetenv("MT_BRANCH")
+			}
+		}()
+		if err := os.Setenv("MT_REPO", chosen.repo); err != nil {
+			return ExitWith(1, "setenv MT_REPO: %v", err)
+		}
+		if err := os.Setenv("MT_BRANCH", chosen.branch); err != nil {
+			return ExitWith(1, "setenv MT_BRANCH: %v", err)
+		}
+		return RunNew(env, []string{"--with", env.Config.DefaultBackend})
 	case "new":
-		// fall through to interactive cmd_new with default backend
 		return RunNew(env, []string{"--with", env.Config.DefaultBackend})
 	default:
-		return ExitWith(1, "unrecognized switch entry marker: %s", marker)
+		return ExitWith(1, "unrecognized switch entry marker: %s", chosen.marker)
 	}
 }
 
@@ -167,9 +236,9 @@ func fzfPick(input, prompt string) (string, error) {
 		if len(parts) < 3 {
 			continue
 		}
-		// "<title-padded>  [<marker>]  <key>" — reading the chosen line and
-		// splitting on whitespace recovers marker and key from the right.
-		display := fmt.Sprintf("%-40s  [%-4s]  %s", parts[0], parts[1], parts[2])
+		// Display "<title-padded>  [<marker>]"; the row key (parts[2]) is
+		// hidden after the tab so the caller can recover it via Split.
+		display := fmt.Sprintf("%-40s  [%-4s]", parts[0], parts[1])
 		// preserve the original |-delimited row at the end (separated by tab)
 		// so the caller can split() and recover marker+key without ambiguity.
 		transformed = append(transformed, display+"\t"+ln)

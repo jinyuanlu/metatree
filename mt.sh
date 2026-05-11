@@ -671,52 +671,87 @@ cmd_switch() {
 
   command -v fzf >/dev/null 2>&1 || die "fzf not found; install: https://github.com/junegunn/fzf"
 
-  # Build a unified target list:
-  #   live  → title | live | pane_id      (selecting it: tmux select-pane)
-  #   dead  → title | dead | worktree_path  (selecting it: revive via mt new)
   ensure_dashboard
-  local live_entries
-  # mt-managed live panes only. Dead worktrees deliberately excluded from
-  # the picker — switch is for navigating between active work, not reviving
-  # graveyards. Use `mt ls` to see all worktrees, `mt prune` to clean dead.
-  live_entries=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
-    -F '#{@mt-managed}|live|#{pane_id}' 2>/dev/null \
-    | grep -v '^|')
 
-  # "+ Create new worktree" — keeps the popup non-empty even when there
-  # are no live panes yet, and gives one-keystroke access to mt new from
-  # inside an agent.
-  local create_entry="+ Create new worktree...|new|<NEW>"
+  # Three row types, listed in this order so the picker stays low-noise:
+  #   live → title | live | pane_id           — select-pane on it
+  #   dead → title | dead | repo \t branch    — respawn via cmd_new
+  #   new  → "+ Create new" | new | (empty)   — interactive cmd_new
+  local -a row_marker row_title row_pane row_repo row_branch
 
-  local entries
-  entries=$(printf '%s\n%s\n' "$live_entries" "$create_entry" | grep -v '^$' || true)
+  # Live entries (top of list).
+  local live_lines
+  live_lines=$(tmux list-panes -t "$MT_TMUX_SESSION:$MT_TMUX_WINDOW" \
+    -F '#{@mt-managed}|#{pane_id}' 2>/dev/null | grep -v '^|' || true)
+  local title pane_id
+  while IFS='|' read -r title pane_id; do
+    [[ -z "$title" ]] && continue
+    row_marker+=("live"); row_title+=("$title")
+    row_pane+=("$pane_id"); row_repo+=(""); row_branch+=("")
+  done <<< "$live_lines"
+
+  # Dead entries: every git worktree minus the ones already live, minus
+  # each repo's own main worktree (Path == Repo).
+  local repo wt branch dead_title i is_live
+  while IFS=$'\t' read -r repo wt; do
+    [[ -z "$repo" || -z "$wt" ]] && continue
+    [[ "$wt" == "$repo" ]] && continue
+    branch=$(basename "$wt")
+    dead_title="$(basename "$repo"):$branch"
+    is_live=0
+    for ((i=0; i<${#row_title[@]:-0}; i++)); do
+      if [[ "${row_marker[i]}" == "live" && "${row_title[i]}" == "$dead_title" ]]; then
+        is_live=1
+        break
+      fi
+    done
+    [[ $is_live -eq 1 ]] && continue
+    row_marker+=("dead"); row_title+=("$dead_title")
+    row_pane+=(""); row_repo+=("$repo"); row_branch+=("$branch")
+  done < <(discover_worktrees)
+
+  # Trailing "+ Create new" so the popup is never empty.
+  row_marker+=("new"); row_title+=("+ Create new worktree...")
+  row_pane+=(""); row_repo+=(""); row_branch+=("")
+
+  # Render each row as "<display>\t<index>"; fzf hides everything past
+  # the tab via --with-nth=1, and the index lets us recover the full row
+  # from the parallel arrays after fzf returns.
+  local fzf_input="" marker_pad
+  for ((i=0; i<${#row_title[@]}; i++)); do
+    case "${row_marker[i]}" in
+      live) marker_pad="live" ;;
+      dead) marker_pad="dead" ;;
+      new)  marker_pad="new " ;;
+    esac
+    fzf_input+="$(printf '%-40s  [%s]\t%d' "${row_title[i]}" "$marker_pad" "$i")"$'\n'
+  done
 
   local choice
-  choice=$(printf '%s\n' "$entries" \
-    | awk -F'|' '{
-        if ($2 == "live")    printf "%-40s  [live]  %s\n", $1, $3
-        else if ($2 == "new") printf "%-40s  [new ]  %s\n", $1, $3
-      }' \
-    | fzf --prompt="switch> " --height=40% --with-nth=1,2 --delimiter='[[:space:]]+') \
+  choice=$(printf '%s' "$fzf_input" \
+    | fzf --prompt="switch> " --height=40% --with-nth=1 --delimiter=$'\t') \
     || exit 1
 
-  # last whitespace-delimited token is either pane_id (live) or the <NEW> sentinel.
-  local key marker
-  key=$(printf '%s' "$choice" | awk '{print $NF}')
-  marker=$(printf '%s' "$choice" | awk '{print $(NF-1)}')
+  local idx
+  idx=$(printf '%s' "$choice" | awk -F'\t' '{print $2}')
+  [[ "$idx" =~ ^[0-9]+$ ]] || die "bad switch row index"
+  (( idx < ${#row_marker[@]} )) || die "switch row index out of range"
 
-  case "$marker" in
-    '[live]')
-      tmux select-pane -t "$key"
-      $zoom && tmux resize-pane -t "$key" -Z
+  case "${row_marker[idx]}" in
+    live)
+      tmux select-pane -t "${row_pane[idx]}"
+      $zoom && tmux resize-pane -t "${row_pane[idx]}" -Z
       attach_dashboard
       ;;
-    '[new'*)
-      # "+ Create new worktree" — fall through to interactive cmd_new
+    dead)
+      MT_REPO="${row_repo[idx]}" MT_BRANCH="${row_branch[idx]}" \
+        cmd_new --with "$MT_DEFAULT_BACKEND"
+      ;;
+    new)
       cmd_new --with "$MT_DEFAULT_BACKEND"
       ;;
     *)
-      die "unrecognized switch entry marker: $marker"
+      die "unrecognized switch entry marker: ${row_marker[idx]}"
       ;;
   esac
 }
@@ -836,6 +871,7 @@ cmd_new() {
       | awk '/^worktree / {print $2}' \
       | grep -qFx "$resolved" \
       || die "path exists: $worktree_path"
+    printf 'mt: resuming %s\n' "$title" >&2
   else
     # Resolve start-point from worktree_base config (or MT_BASE env override).
     # The helper prints "<ref>\t<summary>" on stdout; empty <ref> means

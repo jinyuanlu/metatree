@@ -725,7 +725,7 @@ implementer doesn't decide what to write; they decide when to write it.
 | `TestRmRefusesDirty`               | dirty worktree → refuses without --force               | §8                   |
 | `TestRmForceBypass`                | `--force` removes dirty worktree                       | §9                   |
 | `TestPruneAllDead`                 | dead-only sweep, live preserved                        | §15                  |
-| `TestSwitchExcludesDeadEntries`    | popup picker shows live + create only                  | §16                  |
+| `TestBuildSwitchRows_*`            | picker rows: live → dead → "+Create" (low-noise order) | §16                  |
 | `TestSwitchEmptyShowsCreate`       | empty dashboard → "+Create" entry only                 | (new — gap-fill)     |
 | `TestSwitchAutoDetectsSession`     | `$TMUX` set → uses calling session, not config         | (regression case)    |
 | `TestPathSymlinkResolution`        | macOS /tmp ↔ /private/tmp paths compare correctly      | (regression case)    |
@@ -746,8 +746,10 @@ Examples:
 
 - `TestNewCreatesWorktreeAndPane` — real fixture repo, run `mt new`, assert
   worktree+branch+pane exist and the pane has `@mt-managed` set.
-- `TestSwitchExcludesDeadEntries` — create a pane, kill it, run `mt switch`,
-  capture fzf input via PATH-prepended stub, assert no `[dead]` rows.
+- `TestIntegration_RespawnExistingWorktreeSkipsBranchedFromLine` — create
+  a worktree, kill the tmux server, run `mt new` against the same branch
+  (the dispatch path used by `mt switch`'s `[dead]` rows). Assert stderr
+  carries `mt: resuming ...` and does NOT claim it branched anything.
 - `TestPrefixGBindingFromInsidePane` — use `tmux send-keys` to simulate
   `prefix + g`, assert the popup launched and the right pane is focused.
 

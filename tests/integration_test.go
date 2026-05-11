@@ -399,6 +399,60 @@ worktree_base = "origin-default"
 	}
 }
 
+// TestIntegration_RespawnExistingWorktreeSkipsBranchedFromLine — running
+// `mt new` against a branch whose worktree already exists (the respawn
+// path used by `mt switch`'s dead rows) must not re-fetch from origin
+// nor print the misleading "branched X from Y@sha" line. Instead it
+// prints "mt: resuming X" and reuses the worktree as-is.
+func TestIntegration_RespawnExistingWorktreeSkipsBranchedFromLine(t *testing.T) {
+	f := setup(t)
+
+	// First create: full happy-path, prints "branched from".
+	first := exec.Command(f.mtBin, "new", "--with", "claude")
+	first.Env = append(os.Environ(),
+		"MT_CONFIG="+f.configPath,
+		"TMUX_TMPDIR="+f.tmuxSock,
+		"TMUX=",
+		"MT_REPO="+f.repoPath,
+		"MT_BRANCH=respawn-me",
+	)
+	var firstErr bytes.Buffer
+	first.Stderr = &firstErr
+	_ = first.Run()
+
+	if _, err := os.Stat(filepath.Join(f.repoPath, ".worktrees", "respawn-me")); err != nil {
+		t.Fatalf("initial worktree not created: %v\nstderr:\n%s", err, firstErr.String())
+	}
+
+	// Kill the tmux server so the pane created by first run is gone — that
+	// makes the worktree "dead" from the switch picker's POV.
+	killCmd := exec.Command("tmux", "kill-server")
+	killCmd.Env = append(os.Environ(), "TMUX_TMPDIR="+f.tmuxSock)
+	_ = killCmd.Run()
+
+	// Second create: same branch. This is what dead-row dispatch does
+	// internally — set MT_REPO + MT_BRANCH and call RunNew.
+	second := exec.Command(f.mtBin, "new", "--with", "claude")
+	second.Env = append(os.Environ(),
+		"MT_CONFIG="+f.configPath,
+		"TMUX_TMPDIR="+f.tmuxSock,
+		"TMUX=",
+		"MT_REPO="+f.repoPath,
+		"MT_BRANCH=respawn-me",
+	)
+	var secondErr bytes.Buffer
+	second.Stderr = &secondErr
+	_ = second.Run()
+
+	got := secondErr.String()
+	if !strings.Contains(got, "mt: resuming fixture-repo:respawn-me") {
+		t.Errorf("expected resume notice in stderr; got:\n%s", got)
+	}
+	if strings.Contains(got, "branched itest/respawn-me from") {
+		t.Errorf("respawn must not claim it branched the worktree; got:\n%s", got)
+	}
+}
+
 // TestAuthInvariantNoCredentialRefs — production Go code (cmd/, internal/)
 // must not contain string references to credentials.json or ANTHROPIC_ env
 // vars. Test code (this file, others under tests/) is exempt because tests

@@ -109,9 +109,20 @@ func RunNew(env *Env, args []string) error {
 		return tmuxio.AttachOrSwitch(env.Target())
 	}
 
-	startPoint, err := resolveWorktreeBase(env, repo, fullBranch)
-	if err != nil {
-		return err
+	// Respawn path: if the worktree dir already exists and git knows about
+	// it, skip resolveWorktreeBase. It would otherwise hit origin and print
+	// a misleading "branched X from Y@sha" line — but nothing's being
+	// branched, we're just relaunching the agent in a directory that's
+	// already there.
+	existingWT := isRegisteredWorktree(repo, worktreePath)
+	var startPoint string
+	if existingWT {
+		fmt.Fprintf(env.Stderr, "mt: resuming %s\n", title)
+	} else {
+		startPoint, err = resolveWorktreeBase(env, repo, fullBranch)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Worktree creation. Reuse if path exists AND is git-registered;
@@ -211,6 +222,29 @@ func RunNew(env *Env, args []string) error {
 	}
 
 	return tmuxio.AttachOrSwitch(env.Target())
+}
+
+// isRegisteredWorktree reports whether worktreePath is an existing git
+// worktree of repo, comparing canonical (EvalSymlinks-resolved) paths.
+// Used by RunNew to detect respawn vs first-create.
+func isRegisteredWorktree(repo, worktreePath string) bool {
+	if !fileExists(worktreePath) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(worktreePath)
+	if err != nil {
+		return false
+	}
+	wts, err := gitio.DiscoverWorktrees(nil, []string{repo})
+	if err != nil {
+		return false
+	}
+	for _, w := range wts {
+		if w.Path == resolved {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureWorktree creates the worktree if it doesn't exist; reuses if it does
