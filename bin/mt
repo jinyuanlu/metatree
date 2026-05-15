@@ -1,3 +1,31 @@
 #!/usr/bin/env bash
-# Dev wrapper: runs the local mt.sh from the repo root.
-exec "$(cd "$(dirname "$0")/.." && pwd)/mt.sh" "$@"
+# Dev wrapper: builds (if stale) and exec's the Go binary at bin/mt-go.
+# So `mt` from a $PATH-prepended bin/ always reflects the local Go source
+# without manual rebuilds.
+#
+# For testing the legacy bash reference (mt.sh), use bin/mt-sh.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+GOBIN="$ROOT/bin/mt-go"
+
+# Rebuild on missing binary, OR when any tracked Go source is newer.
+needs_build=0
+if [[ ! -x "$GOBIN" ]]; then
+  needs_build=1
+elif [[ -n "$(find "$ROOT/cmd" "$ROOT/internal" -name '*.go' -newer "$GOBIN" -print -quit 2>/dev/null)" ]]; then
+  needs_build=1
+fi
+
+if [[ "$needs_build" == 1 ]]; then
+  command -v go >/dev/null 2>&1 || {
+    echo "mt: go not found; install Go or run \`./bin/mt-sh\` for the bash reference" >&2
+    exit 1
+  }
+  ( cd "$ROOT" && go build -o "$GOBIN" ./cmd/mt ) || {
+    echo "mt: go build failed" >&2
+    exit 1
+  }
+fi
+
+exec "$GOBIN" "$@"

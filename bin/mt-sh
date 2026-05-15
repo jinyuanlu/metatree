@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Dev wrapper: runs the local mt.sh from the repo root.
+exec "$(cd "$(dirname "$0")/.." && pwd)/mt.sh" "$@"
