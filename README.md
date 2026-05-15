@@ -221,6 +221,14 @@ mt                   # reattach (any new terminal, any time later)
 tmux attach -t mt    # equivalent — useful when mt isn't on PATH yet
 ```
 
+**Reviving a dead worktree resumes its Claude Code conversation.** When
+you pick a `[dead]` entry in `mt switch` (or run `mt new` on a worktree
+that already exists), `mt` invokes `claude --continue` so you land back
+in the same session you left — provided Claude has a saved session for
+that worktree at `~/.claude/projects/<path-encoded>/*.jsonl`. If there
+is no saved session (first agent run in this worktree), `mt` starts
+fresh. No config knob, no flag — just works.
+
 New to tmux entirely? `man tmux` is dense but complete. The first 30 minutes of any tmux tutorial covers everything `mt` needs.
 
 ## Why not [other tool]
@@ -236,12 +244,9 @@ If those aren't your priorities, [`claude-squad`](https://github.com/smtg-ai/cla
 <details>
 <summary><b>How <code>claude_cmd</code> is launched</b> — implementation detail; expand only if your alias-driven flags aren't reaching the agent</summary>
 
-`mt` runs `claude` (and `ollama`) through your interactive shell so that any alias you've defined for the agent is honored — the typical case is `alias claude='claude --mcp-config ~/.claude/mcp.json'`, and that flag survives every `mt new`. This applies to both the first pane and every subsequent pane.
+`mt` runs `claude` (and `ollama`) through your interactive shell so that any alias you've defined for the agent is honored — the typical case is `alias claude='claude --mcp-config ~/.claude/mcp.json'`, and that flag survives every `mt new`.
 
-Concretely:
-
-- **First pane.** `mt` types `cd <worktree> && <claude_cmd>; exit` into the existing dashboard pane shell. The shell expands the alias before running; `; exit` closes the pane when the agent exits.
-- **Subsequent panes.** `mt` runs `tmux split-window` with the agent command wrapped as `$SHELL -ic '<claude_cmd>'`. The wrapping shell reads your rcfile (`.bashrc` / `.zshrc` / `config.fish`), expands the alias, and exits when the agent exits — closing the pane.
+Concretely, `mt` runs `tmux split-window` with the agent command wrapped as `$SHELL -ic '<claude_cmd>'`. The wrapping shell reads your rcfile (`.bashrc` / `.zshrc` / `config.fish`), expands the alias, and exits when the agent exits — closing the pane. The bare-shell pane that tmux creates with the session is left alone as the dashboard's anchor (it keeps the tmux server alive when every agent pane exits).
 
 We deliberately do **not** prefix the inner command with `exec`: in both bash and zsh, `exec <name>` is a special-builtin form that suppresses alias expansion on its argument, which would silently drop the `--mcp-config` flag from your alias and load the bare `claude` binary.
 

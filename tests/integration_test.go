@@ -700,6 +700,144 @@ func TestUnknownShellWarningEmitted(t *testing.T) {
 	}
 }
 
+// TestClaudeAutoResumeOnRevive verifies the auto-resume contract: when
+// a worktree already exists AND Claude has a saved session for that
+// path, mt's next `mt new` (the revive path that `mt switch` → dead
+// also funnels through) appends `--continue` to the agent invocation.
+// When there's no saved session, no flag is injected and the agent
+// starts fresh.
+//
+// We stub `claude` with a script that logs its argv to a file. Two
+// invocations: the first creates the worktree (no prior session → no
+// flag); we then drop a fake `.jsonl` at the encoded project path and
+// run again (session present → --continue expected).
+func TestClaudeAutoResumeOnRevive(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available; skipping auto-resume integration test")
+	}
+
+	f := setup(t)
+
+	binDir := filepath.Join(f.tmp, "bin")
+	argvLog := filepath.Join(f.tmp, "argv.log")
+
+	// Stub: log argv and exit. The fast exit lets the pane close on its
+	// own so the worktree returns to "dead" between invocations — the
+	// state the revive code path actually targets.
+	mustWrite(t, filepath.Join(binDir, "claude"),
+		"#!/bin/sh\n"+
+			fmt.Sprintf(`echo "ARGV: $*" >> %q`+"\n", argvLog))
+	if err := os.Chmod(filepath.Join(binDir, "claude"), 0o755); err != nil {
+		t.Fatalf("chmod stub: %v", err)
+	}
+
+	fakeHome := filepath.Join(f.tmp, "home")
+	if err := os.MkdirAll(fakeHome, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	// Empty rcfile — we test --continue injection, not alias expansion
+	// (TestAliasExpansionInSubsequentPane already covers the latter).
+	mustWrite(t, filepath.Join(fakeHome, ".bashrc"), "")
+
+	// Force the bare `claude` command in config so the only thing that
+	// could put `--continue` on the argv is mt's resume injection.
+	mustWrite(t, f.configPath, fmt.Sprintf(`repos = ["%s"]
+tmux_session = "mt-itest"
+tmux_window = "dashboard"
+branch_prefix = "itest"
+worktree_subdir = ".worktrees"
+default_backend = "claude"
+claude_cmd = "claude"
+auto_direnv_allow = false
+auto_status_chrome = false
+worktree_base = "head"
+`, f.repoPath))
+
+	runMtNew := func() {
+		cmd := exec.Command(f.mtBin, "new", "--with", "claude")
+		env := append([]string{}, os.Environ()...)
+		env = withEnv(env, "HOME", fakeHome)
+		env = withEnv(env, "SHELL", bashPath)
+		env = withEnv(env, "PATH", binDir+":"+os.Getenv("PATH"))
+		env = withEnv(env, "ZDOTDIR", "")
+		env = append(env,
+			"MT_CONFIG="+f.configPath,
+			"TMUX_TMPDIR="+f.tmuxSock,
+			"TMUX=",
+			"MT_REPO="+f.repoPath,
+			"MT_BRANCH=revive-test",
+		)
+		cmd.Env = env
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		_ = cmd.Run() // attach fails (no TTY); the relevant work is done by then
+		if s := stderr.String(); s != "" {
+			t.Logf("[mt new] stderr:\n%s", s)
+		}
+	}
+
+	waitForLogLines := func(want int) string {
+		for i := 0; i < 50; i++ {
+			b, err := os.ReadFile(argvLog)
+			if err == nil && bytes.Count(b, []byte("\n")) >= want {
+				return string(b)
+			}
+			mustSleep(t, 100)
+		}
+		b, _ := os.ReadFile(argvLog)
+		t.Fatalf("expected >= %d lines in argv log; got %d:\n%s",
+			want, bytes.Count(b, []byte("\n")), b)
+		return ""
+	}
+
+	// Wait for the agent pane to clear so the second `mt new` doesn't
+	// hit the "live pane → focus existing" idempotency branch.
+	waitForNoAgentPane := func() {
+		for i := 0; i < 50; i++ {
+			managed := 0
+			for _, p := range f.listPanes("mt-itest:dashboard") {
+				if p.MtManaged != "" {
+					managed++
+				}
+			}
+			if managed == 0 {
+				return
+			}
+			mustSleep(t, 100)
+		}
+		t.Fatalf("agent pane never cleared from dashboard")
+	}
+
+	// Pass 1: worktree does not yet exist → existingWT=false → no flag.
+	runMtNew()
+	first := waitForLogLines(1)
+	if strings.Contains(first, "--continue") {
+		t.Errorf("first mt new must NOT pass --continue (worktree just created, no prior session)\nlog:\n%s", first)
+	}
+	waitForNoAgentPane()
+
+	// Simulate Claude having written session state during the first run.
+	// Encoding mirrors internal/command/claude_resume.go encodeClaudeProject
+	// (test verifies the rule by reproducing it).
+	wtPath := filepath.Join(f.repoPath, ".worktrees", "revive-test")
+	encoded := strings.ReplaceAll(strings.ReplaceAll(wtPath, "/", "-"), ".", "-")
+	projectDir := filepath.Join(fakeHome, ".claude", "projects", encoded)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	mustWrite(t, filepath.Join(projectDir, "session.jsonl"), "")
+
+	// Pass 2: existingWT=true AND hasClaudeSession=true → --continue.
+	runMtNew()
+	full := waitForLogLines(2)
+	hits := strings.Count(full, "--continue")
+	if hits != 1 {
+		t.Errorf("expected exactly 1 --continue in argv log after revive; got %d\nlog:\n%s",
+			hits, full)
+	}
+}
+
 // helpers —
 
 func mustRun(t *testing.T, cwd string, name string, args ...string) {

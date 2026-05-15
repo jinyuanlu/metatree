@@ -165,6 +165,16 @@ func RunNew(env *Env, args []string) error {
 		}
 	}
 
+	// Auto-resume claude on revive. When the worktree already exists AND
+	// Claude has a saved session for it, append --continue so the user
+	// returns to the conversation instead of starting fresh. The append
+	// survives shell-alias expansion: `alias claude='claude --mcp …'`
+	// becomes `claude --mcp … --continue` after the shell expands.
+	if backend == "claude" && existingWT && hasClaudeSession(worktreePath) {
+		cmd += " --continue"
+		fmt.Fprintln(env.Stderr, "mt: resuming claude session")
+	}
+
 	// Always split. The dashboard's anchor pane (an unmarked shell) is
 	// guaranteed to exist by `dashboard.Ensure` → `ensureAnchor`, which
 	// ran at line 98 above. The anchor keeps the session — and the tmux

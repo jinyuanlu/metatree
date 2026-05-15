@@ -675,6 +675,15 @@ agent exits. `dashboard.Ensure` enforces this on every invocation via
 `ensureAnchor` (see §10), so a user `exit`ing the anchor pane is
 self-healing on the next `mt` call.
 
+**Auto-resume on revive.** When the worktree already exists (the user
+picked a `[dead]` entry in `mt switch` or re-ran `mt new`) and the
+backend is `claude`, `RunNew` appends ` --continue` to the agent cmd
+*if* Claude has a saved session for that worktree path (any `.jsonl`
+under `~/.claude/projects/<encoded>/`, where the encoding maps `/`
+and `.` to `-`; see `claude_resume.go`). The append happens before
+`wrapAgentCmd`, so an aliased `claude` still expands and picks up the
+flag. No saved session ⇒ start fresh, no flag injected.
+
 **Do not prefix the inner command with `exec`.** Bash and zsh treat
 `exec <name>` as a special-builtin form that bypasses alias expansion
 on its argument — using it silently defeats the entire contract. The

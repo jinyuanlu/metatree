@@ -208,7 +208,7 @@ Four commands. No flags beyond `--help` and a single `--with` selector for backe
 | `mt ls`                                | List all worktrees across tracked repos. Shows `(repo, branch, path, backend, pane_state)` where `pane_state ∈ {live, dead}`. Pipeable: `mt ls \| grep feat-` to filter.                                                                              |
 | `mt rm [--force]`                      | Pick a worktree (fzf), remove it via `git worktree remove`, kill its tmux pane if present, re-tile the dashboard. **Refuses if the worktree has uncommitted changes** — propagates `git`'s warning. `--force` bypasses by passing `--force` through to `git worktree remove`. |
 | `mt show`                              | Attach to (or create) the `mt:dashboard` window. **Autocreates the tmux session and window if missing** — works as the first command of the day even if `tmux` was killed overnight. No-op if already focused there.                                  |
-| `mt switch [-z]`                       | fzf jump to any **live** pane or **dead** worktree. Live → focuses pane (and zooms with `-z`). Dead → revives by re-launching the default backend in a new pane. Designed to be invoked from a `tmux display-popup` so it's reachable from inside an active agent. |
+| `mt switch [-z]`                       | fzf jump to any **live** pane or **dead** worktree. Live → focuses pane (and zooms with `-z`). Dead → revives by re-launching the default backend in a new pane; for `claude`, if a saved session exists at `~/.claude/projects/<encoded>/*.jsonl`, mt appends `--continue` so the conversation resumes. Designed to be invoked from a `tmux display-popup` so it's reachable from inside an active agent. |
 | `mt prune [--force]`                   | Bulk-remove all dead worktrees (those with no live pane on the dashboard). Interactive y/N confirm; `--force` skips it AND bypasses git's dirty-tree refusal. Each removal: `git worktree remove`, `git branch -D` (if no upstream). |
 | `mt bind`                              | Install tmux keybindings (`prefix+g`, `prefix+G`, `prefix+N`, `prefix+R`) on the running tmux server, each wrapping an `mt` subcommand in `display-popup`. Non-persistent — prints the lines to add to `~/.tmux.conf` for permanence. Bindings use the absolute path to `mt.sh` so they survive PATH inheritance issues. Requires tmux 3.2+. |
 
@@ -313,10 +313,13 @@ auto_direnv_allow = "true"
 
 ### 2.6.1 Agent-launch contract
 
-`mt` does not invoke `claude_cmd` / `ollama_cmd` as a bare subprocess. Both forms below MUST run the agent through the user's interactive shell so that any alias for the agent (e.g. `alias claude='claude --mcp-config ~/.claude/mcp.json'`) is honored and contributes its flags:
+`mt` does not invoke `claude_cmd` / `ollama_cmd` as a bare subprocess. Every agent pane MUST run the agent through the user's interactive shell so that any alias for the agent (e.g. `alias claude='claude --mcp-config ~/.claude/mcp.json'`) is honored and contributes its flags.
 
-- **First pane** (the bare-shell pane tmux gave us at session creation): `mt` uses `tmux send-keys` to type `cd <worktree> && <claude_cmd>; exit` into the pane. The existing interactive shell expands the alias before running. The trailing `; exit` ensures the pane closes when the agent exits.
-- **Subsequent panes** (created via `tmux split-window`): `mt` wraps the agent command as `$SHELL -ic '<claude_cmd>'`. tmux otherwise dispatches `split-window`'s command argument through `/bin/sh -c`, which is non-interactive and never sources the user's rcfile, so the alias would be silently lost.
+`RunNew` always creates agents via `tmux split-window`, wrapping the agent command as `$SHELL -ic '<claude_cmd>'`. tmux otherwise dispatches `split-window`'s command argument through `/bin/sh -c`, which is non-interactive and never sources the user's rcfile, so the alias would be silently lost.
+
+The bare-shell pane that `tmux new-session` creates with the dashboard is the **anchor pane** — intentionally never marked `@mt-managed` and never repurposed for an agent. It exists so the tmux server outlives every agent's lifecycle: when the last agent exits, the anchor keeps the session alive and `prefix+g` still works. `dashboard.Ensure` enforces this on every invocation (re-splitting an anchor if the user killed the previous one), so the invariant is load-bearing, not conventional.
+
+**Auto-resume on revive.** When the worktree already exists (the user picked a `[dead]` entry in `mt switch`, or re-ran `mt new`) and the backend is `claude`, `RunNew` appends ` --continue` to the agent command if Claude has a saved session at `~/.claude/projects/<encoded>/*.jsonl`. Encoding maps `/` and `.` in the worktree's absolute path to `-`. No saved session ⇒ no flag, fresh start. The append happens before the shell wrap, so an aliased `claude` still expands.
 
 The wrap is **only applied** when `$SHELL` resolves (via `filepath.Base`) to `bash`, `zsh`, or `fish`. For any other shell — nushell, PowerShell, dash, busybox `ash`, or an unset `$SHELL` — `mt` passes the command through unchanged (no regression vs. the pre-contract behavior) and emits a one-line warning to stderr pointing the user at `claude_cmd` in `~/.config/mt/config.toml`. Setting `claude_cmd = "claude --mcp-config $HOME/.claude/mcp.json"` is honored verbatim regardless of shell.
 
@@ -448,7 +451,7 @@ V1 is complete when, on a clean install:
 7. `pgrep mt` returns no PIDs ten seconds after any invocation completes.
 8. `~/.claude/.credentials.json` is byte-identical before and after a `mt new --with claude` invocation. (Confirms §1.4.)
 9. Works in Terminal.app default profile with no configuration changes (tmux 3.x, bash 3.2+, fzf, git ≥ 2.5). No truecolor, no Nerd Font, no special keybindings required.
-10. **Alias contract (§2.6.1).** With `alias claude='claude --injected-flag'` defined in the user's bash/zsh/fish rcfile, two consecutive `mt new` invocations produce two panes whose `claude` processes both have `--injected-flag` in `argv` — verifying that alias expansion fires identically on the first pane (send-keys path) and every subsequent pane (split-window-with-wrap path).
+10. **Alias contract (§2.6.1).** With `alias claude='claude --injected-flag'` defined in the user's bash/zsh/fish rcfile, two consecutive `mt new` invocations produce two panes whose `claude` processes both have `--injected-flag` in `argv` — verifying that the `$SHELL -ic` wrap expands the alias on every pane mt creates.
 
 ### 2.8 Failure modes
 
