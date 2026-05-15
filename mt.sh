@@ -862,6 +862,10 @@ cmd_new() {
     return
   fi
 
+  # start_point is declared up-front so it's always bound under set -u, even
+  # in the resume branch below where we never compute one (no fetch, no base
+  # ref to resolve). mark_pane treats an empty third arg as "no @mt-base".
+  local start_point=""
   if [[ -d "$worktree_path" ]]; then
     # macOS /tmp resolves through a symlink to /private/tmp; git stores
     # worktree paths in their canonical (resolved) form. Resolve both
@@ -877,7 +881,7 @@ cmd_new() {
     # The helper prints "<ref>\t<summary>" on stdout; empty <ref> means
     # "use parent HEAD" (omit the start-point arg).
     local effective_base="${MT_BASE:-$MT_WORKTREE_BASE}"
-    local resolved start_point summary
+    local resolved summary
     resolved=$(resolve_worktree_base "$repo" "$effective_base" "$full_branch") \
       || exit $?
     start_point="${resolved%%	*}"
