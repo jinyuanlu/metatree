@@ -491,15 +491,14 @@ func TestAuthInvariantNoCredentialRefs(t *testing.T) {
 
 // TestAliasExpansionInSubsequentPane verifies the fix for the silent
 // MCP-loss bug: when the user has aliased `claude` (e.g. to inject
-// `--mcp-config $HOME/.claude/mcp.json`), every pane mt creates must
-// honor that alias — including the second-and-later panes that go
-// through `tmux split-window` (path 2 in lifecycle.go).
+// `--mcp-config $HOME/.claude/mcp.json`), every agent pane mt creates
+// must honor that alias.
 //
 // Before the fix: tmux split-window dispatched the cmd through
 // `/bin/sh -c`, which is non-interactive and never sourced ~/.bashrc,
-// so aliases were silently dropped on pane #2+. The first pane (fed
-// via send-keys into a live shell) was unaffected, so the bug was
-// asymmetric and easy to miss.
+// so aliases were silently dropped. wrapAgentCmd now wraps in
+// `$SHELL -ic '<cmd>'` so the user's interactive rcfile sources and
+// the alias expands.
 //
 // This test sets up two stubs:
 //   - bin/claude       writes "PATH-CLAUDE: <argv>" to a log file
@@ -558,10 +557,10 @@ func TestAliasExpansionInSubsequentPane(t *testing.T) {
 			fmt.Sprintf(rcBody, name))
 	}
 
-	// Spawn pane #1 (path 1: send-keys into existing shell). Branch "first".
-	// We rely on the same start+wait+kill pattern as TestNewCreatesWorktreeAndPane.
-	// Inherit the parent env (we need tmux/git on PATH); override HOME, SHELL,
-	// and prepend binDir so the stub `claude` resolves before any real one.
+	// Spawn an agent pane. We rely on the same start+wait+kill pattern as
+	// TestNewCreatesWorktreeAndPane. Inherit the parent env (we need
+	// tmux/git on PATH); override HOME, SHELL, and prepend binDir so the
+	// stub `claude` resolves before any real one.
 	runMtNew := func(branch string) {
 		cmd := exec.Command(f.mtBin, "new", "--with", "claude")
 		env := append([]string{}, os.Environ()...)
@@ -588,11 +587,9 @@ func TestAliasExpansionInSubsequentPane(t *testing.T) {
 			}
 		}()
 		// Run mt to completion (no Kill). It exits with rc=1 quickly when
-		// tmux attach fails (no TTY in tests), but that's *after* the
-		// MarkPane step that managedCount depends on. Killing on
-		// "worktree dir lands" raced past MarkPane on slower runners and
-		// silently regressed pane #2 to path 1. cmd.Wait() also joins the
-		// stderr-copy goroutine — required for the deferred reader.
+		// tmux attach fails (no TTY in tests), but that's after MarkPane
+		// has run. cmd.Wait() also joins the stderr-copy goroutine —
+		// required for the deferred reader.
 		if err := cmd.Run(); err == nil {
 			// mt is expected to exit non-zero (tmux attach fails); a
 			// rare zero return isn't itself a failure for this test.
@@ -657,51 +654,49 @@ worktree_base = "head"
 }
 
 // TestUnknownShellWarningEmitted verifies that when $SHELL is something
-// mt doesn't know how to wrap (nu, pwsh, dash, …), pane #2 creation
+// mt doesn't know how to wrap (nu, pwsh, dash, …), agent-pane creation
 // emits the documented warning to stderr that points the user at
 // claude_cmd in config.toml.
 //
 // The warning is the only signal the user has that aliases are silently
 // not expanding, so its presence is load-bearing — keep this test
 // strict on the substring.
+//
+// Spawns two panes in succession (asymmetry guard). If someone later
+// reintroduces a "first pane" code path that bypasses wrapAgentCmd, a
+// single-pane test would still pass on the second pane and silently
+// regress the first. Counting two hits across two invocations catches
+// that.
 func TestUnknownShellWarningEmitted(t *testing.T) {
 	f := setup(t)
 
-	// First pane primes the dashboard (path 1, no warning expected).
-	cmd1 := exec.Command(f.mtBin, "new", "--with", "claude")
-	cmd1.Env = append(os.Environ(),
-		"MT_CONFIG="+f.configPath,
-		"TMUX_TMPDIR="+f.tmuxSock,
-		"TMUX=",
-		"MT_REPO="+f.repoPath,
-		"MT_BRANCH=first",
-		"SHELL=/usr/local/bin/nu",
-	)
-	// Run to completion (not Kill-mid-flight). MarkPane must finish before
-	// cmd2 fires, otherwise managedCount==0 and cmd2 falls back to path 1
-	// (no split-window, no warning). See runMtNew above.
-	_ = cmd1.Run()
-
-	// Second pane goes through path 2 — the warning should fire here.
-	cmd2 := exec.Command(f.mtBin, "new", "--with", "claude")
-	cmd2.Env = append(os.Environ(),
-		"MT_CONFIG="+f.configPath,
-		"TMUX_TMPDIR="+f.tmuxSock,
-		"TMUX=",
-		"MT_REPO="+f.repoPath,
-		"MT_BRANCH=second",
-		"SHELL=/usr/local/bin/nu",
-	)
-	var stderr bytes.Buffer
-	cmd2.Stderr = &stderr
-	_ = cmd2.Run() // run to completion (Run = Start + Wait)
-
-	out := stderr.String()
-	if !strings.Contains(out, "$SHELL=/usr/local/bin/nu not recognized") {
-		t.Errorf("expected unknown-shell warning naming nu, got stderr:\n%s", out)
+	runMtNew := func(branch string) string {
+		cmd := exec.Command(f.mtBin, "new", "--with", "claude")
+		cmd.Env = append(os.Environ(),
+			"MT_CONFIG="+f.configPath,
+			"TMUX_TMPDIR="+f.tmuxSock,
+			"TMUX=",
+			"MT_REPO="+f.repoPath,
+			"MT_BRANCH="+branch,
+			"SHELL=/usr/local/bin/nu",
+		)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		_ = cmd.Run() // run to completion (Run = Start + Wait)
+		return stderr.String()
 	}
-	if !strings.Contains(out, "claude_cmd") || !strings.Contains(out, "config.toml") {
-		t.Errorf("warning should point at claude_cmd in config.toml, got:\n%s", out)
+
+	out1 := runMtNew("first")
+	out2 := runMtNew("second")
+	combined := out1 + out2
+
+	hits := strings.Count(combined, "$SHELL=/usr/local/bin/nu not recognized")
+	if hits != 2 {
+		t.Errorf("expected unknown-shell warning to fire on BOTH agent panes (asymmetry guard); got %d hits\n--- stderr 1 ---\n%s\n--- stderr 2 ---\n%s",
+			hits, out1, out2)
+	}
+	if !strings.Contains(combined, "claude_cmd") || !strings.Contains(combined, "config.toml") {
+		t.Errorf("warning should point at claude_cmd in config.toml, got:\n%s", combined)
 	}
 }
 

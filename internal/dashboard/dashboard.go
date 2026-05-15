@@ -73,6 +73,11 @@ func Ensure(cfg *config.Config, mtPath string) (string, error) {
 		}
 	}
 
+	target := string(session) + ":" + string(window)
+	if err := ensureAnchor(target); err != nil {
+		return "", fmt.Errorf("ensure anchor pane: %w", err)
+	}
+
 	notice := ""
 	installed, err := bindingsInstalled()
 	if err == nil && !installed {
@@ -81,6 +86,31 @@ func Ensure(cfg *config.Config, mtPath string) (string, error) {
 		}
 	}
 	return notice, nil
+}
+
+// ensureAnchor guarantees the dashboard window has at least one unmarked
+// pane (no `@mt-managed`). The anchor is what keeps the session — and
+// the tmux server — alive when every agent pane exits. Without it the
+// last agent's exit cascades: pane → window → session → server.
+//
+// Idempotent. If an unmarked pane already exists (the common case —
+// EnsureSession creates one with the window), this is a no-op. If the
+// user manually killed the anchor and only agent panes remain, splits
+// a fresh shell pane to restore the invariant.
+func ensureAnchor(target string) error {
+	panes, err := tmuxio.ListPanes(target)
+	if err != nil {
+		return err
+	}
+	for _, p := range panes {
+		if p.MtManaged == "" {
+			return nil // anchor already present
+		}
+	}
+	if _, err := tmuxio.SplitPane(target, "", ""); err != nil {
+		return err
+	}
+	return nil
 }
 
 // applyChrome sets pane-border-format on the window and status-right on the
@@ -190,16 +220,6 @@ func ListManaged(target string) ([]tmuxio.Pane, error) {
 		}
 	}
 	return out, nil
-}
-
-// ManagedCount counts mt-managed panes on the given target. Used by `mt new`
-// to decide between bare-shell-reuse (0) and split-window (>0).
-func ManagedCount(target string) (int, error) {
-	managed, err := ListManaged(target)
-	if err != nil {
-		return 0, err
-	}
-	return len(managed), nil
 }
 
 // quote wraps a string in double-quotes for tmux command-string contexts.

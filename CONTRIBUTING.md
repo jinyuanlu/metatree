@@ -537,14 +537,24 @@ func FindPane(target string, title string) (tmuxio.PaneID, error)
 
 // All mt-managed panes on the dashboard.
 func ListManaged(target string) ([]tmuxio.Pane, error)
-
-// Count of mt-managed panes — used by `new` to decide split-vs-reuse.
-func ManagedCount(target string) (int, error)
 ```
 
 `@mt-managed` is the **only** string mt looks at to make decisions about
 panes. `pane_title` is purely informational (and visible to the user) —
 it can change at any time and that's fine.
+
+The bare-shell pane that `EnsureSession` creates with the dashboard is
+intentionally **never** marked `@mt-managed`. It is the dashboard's
+anchor — present so the tmux server survives when every agent pane
+exits. Picker and listing code already filter on `@mt-managed != ""`,
+so the anchor is invisible to `mt ls` / `mt switch`.
+
+`dashboard.Ensure` (via `ensureAnchor`) makes the anchor a **load-bearing
+invariant**, not a convention: on every `mt` invocation it lists panes
+on the window and, if every pane is `@mt-managed`, splits a fresh
+unmarked pane to restore the anchor. So even if the user kills the
+anchor with `tmux kill-pane` or `exit`s it, the next `mt` call brings
+it back before doing any other work.
 
 ---
 
@@ -650,17 +660,20 @@ func main() {
 
 ### Agent launch wrapping (spec.md §2.6.1)
 
-The two pane-creation paths in `RunNew` (`internal/command/lifecycle.go`)
-must keep `claude_cmd` / `ollama_cmd` alias-expansion equivalent:
+`RunNew` (`internal/command/lifecycle.go`) creates every agent pane the
+same way: `tmuxio.SplitPane` with the cmd run through `wrapAgentCmd`
+(`internal/command/launch.go`). For recognized shells (bash/zsh/fish)
+the wrap yields `$SHELL -ic '<cmd>'`; for unrecognized shells the cmd
+is passed through unwrapped and `RunNew` MUST emit a one-line stderr
+warning pointing at `claude_cmd` in `~/.config/mt/config.toml`.
 
-- **Path 1** (first pane, `managedCount == 0`): build the keystroke
-  string as `cd <wt> && <cmd>; exit` (no `exec`). The trailing `; exit`
-  closes the pane on agent exit.
-- **Path 2** (subsequent panes): pass `cmd` through `wrapAgentCmd` in
-  `internal/command/launch.go`, which yields `$SHELL -ic '<cmd>'` for
-  recognized shells (bash/zsh/fish) and the unwrapped `cmd` otherwise.
-  Recognized=false MUST emit a one-line stderr warning pointing at
-  `claude_cmd` in `~/.config/mt/config.toml`.
+The bare-shell pane created by `EnsureSession` is the **dashboard
+anchor** — unmarked, persistent, and never repurposed for an agent.
+Keeping it alive is what prevents the
+only-pane-in-only-session-in-only-server collapse cascade when every
+agent exits. `dashboard.Ensure` enforces this on every invocation via
+`ensureAnchor` (see §10), so a user `exit`ing the anchor pane is
+self-healing on the next `mt` call.
 
 **Do not prefix the inner command with `exec`.** Bash and zsh treat
 `exec <name>` as a special-builtin form that bypasses alias expansion

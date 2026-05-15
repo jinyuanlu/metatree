@@ -165,61 +165,33 @@ func RunNew(env *Env, args []string) error {
 		}
 	}
 
-	// Decide split-vs-reuse based on @mt-managed pane count, NOT pane_title.
-	// pane_title gets clobbered by Claude's OSC 2; @mt-managed survives.
-	managedCount, err := dashboard.ManagedCount(env.Target())
+	// Always split. The dashboard's anchor pane (an unmarked shell) is
+	// guaranteed to exist by `dashboard.Ensure` → `ensureAnchor`, which
+	// ran at line 98 above. The anchor keeps the session — and the tmux
+	// server — alive when every agent pane exits, preventing the
+	// pane→window→session→server collapse cascade. Agents always go in
+	// a fresh split.
+	//
+	// tmux split-window dispatches its cmd through /bin/sh -c, which is
+	// non-interactive and never sources the user's rcfile. wrapAgentCmd
+	// wraps in `$SHELL -ic '<cmd>'` for recognized shells so aliases on
+	// claude_cmd / ollama_cmd expand; see internal/command/launch.go.
+	launchCmd, recognized := wrapAgentCmd(cmd)
+	if !recognized {
+		fmt.Fprintf(env.Stderr,
+			"mt: $SHELL=%s not recognized; aliases in claude_cmd/ollama_cmd will not expand.\n"+
+				"    To inject flags reliably, set the literal command in ~/.config/mt/config.toml — e.g.\n"+
+				"        claude_cmd = \"claude --mcp-config $HOME/.claude/mcp.json\"\n",
+			shellOrUnset())
+	}
+	newPane, err := tmuxio.SplitPane(env.Target(), worktreePath, launchCmd)
 	if err != nil {
-		return ExitWith(1, "count managed panes: %v", err)
+		return ExitWith(1, "split-window: %v", err)
 	}
-
-	if managedCount == 0 {
-		// First mt session: reuse the bare-shell pane tmux gave us at
-		// session creation. send-keys "cd && exec cmd".
-		panes, err := tmuxio.ListPanes(env.Target())
-		if err != nil || len(panes) == 0 {
-			return ExitWith(1, "list panes: %v", err)
-		}
-		first := panes[0].ID
-		// Note: we deliberately do NOT use `exec <cmd>` here. In bash and
-		// zsh, `exec <name>` is a special-builtin form that does not
-		// trigger alias expansion on its argument — so `exec claude`
-		// would bypass the user's `alias claude='claude --mcp-config ...'`
-		// and load the bare binary. Run `<cmd>` plainly so the alias
-		// expands, then `; exit` so the pane still closes when the
-		// agent exits (matching the previous `exec`-based behavior).
-		keys := fmt.Sprintf("cd %s && %s; exit", worktreePath, cmd)
-		if err := tmuxio.SendKeys(first, keys); err != nil {
-			return ExitWith(1, "send-keys: %v", err)
-		}
-		if err := dashboard.MarkPane(first, title, startPoint); err != nil {
-			return ExitWith(1, "mark pane: %v", err)
-		}
-	} else {
-		// Subsequent sessions: split-window with the agent as the cmd.
-		//
-		// tmux split-window dispatches its cmd through /bin/sh -c, which
-		// is non-interactive and never sources the user's rcfile. Wrap
-		// in `$SHELL -ic 'exec <cmd>'` so aliases for claude_cmd /
-		// ollama_cmd expand here the same way they do in pane #1 (which
-		// is fed via send-keys into a live interactive shell). See
-		// wrapAgentCmd in launch.go for the full rationale.
-		launchCmd, recognized := wrapAgentCmd(cmd)
-		if !recognized {
-			fmt.Fprintf(env.Stderr,
-				"mt: $SHELL=%s not recognized; aliases in claude_cmd/ollama_cmd will not expand.\n"+
-					"    To inject flags reliably, set the literal command in ~/.config/mt/config.toml — e.g.\n"+
-					"        claude_cmd = \"claude --mcp-config $HOME/.claude/mcp.json\"\n",
-				shellOrUnset())
-		}
-		newPane, err := tmuxio.SplitPane(env.Target(), worktreePath, launchCmd)
-		if err != nil {
-			return ExitWith(1, "split-window: %v", err)
-		}
-		if err := dashboard.MarkPane(newPane, title, startPoint); err != nil {
-			return ExitWith(1, "mark pane: %v", err)
-		}
-		_ = tmuxio.TileLayout(env.Target())
+	if err := dashboard.MarkPane(newPane, title, startPoint); err != nil {
+		return ExitWith(1, "mark pane: %v", err)
 	}
+	_ = tmuxio.TileLayout(env.Target())
 
 	return tmuxio.AttachOrSwitch(env.Target())
 }
