@@ -42,6 +42,11 @@ var ErrNoOrigin = errors.New("no origin remote")
 // are present on it.
 var ErrNoDefaultBranch = errors.New("no default branch found on origin")
 
+// ErrWorktreeDirty is returned by WorktreeRemove when git refused removal
+// because the worktree contains modified or untracked files. Callers can
+// detect this with errors.Is and prompt the user to retry with force=true.
+var ErrWorktreeDirty = errors.New("worktree has uncommitted changes")
+
 // Worktree is one entry returned by DiscoverWorktrees.
 //
 // Repo is the canonical (symlink-resolved) parent repo path. Path is the
@@ -668,6 +673,11 @@ func WorktreeAddNoCheckout(repo, branchName, path, startPoint string) error {
 
 // WorktreeRemove removes a worktree. With force=true, `--force` is passed
 // to bypass git's dirty-tree refusal.
+//
+// When force=false and git refuses because the worktree is dirty, the
+// returned error wraps ErrWorktreeDirty so callers can distinguish the
+// recoverable case (offer to retry with --force) from genuine failures
+// like a missing path or a locked worktree.
 func WorktreeRemove(repo, path string, force bool) error {
 	args := []string{"-C", repo, "worktree", "remove"}
 	if force {
@@ -678,8 +688,13 @@ func WorktreeRemove(repo, path string, force bool) error {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("git worktree remove -C %s %s (force=%t): %w (%s)",
-			repo, path, force, err, strings.TrimSpace(stderr.String()))
+		msg := strings.TrimSpace(stderr.String())
+		// git emits "...contains modified or untracked files, use --force
+		// to delete it" — the "use --force" suffix is the stable marker.
+		if !force && strings.Contains(msg, "use --force") {
+			return fmt.Errorf("%w: %s", ErrWorktreeDirty, msg)
+		}
+		return fmt.Errorf("git worktree remove %s: %w (%s)", path, err, msg)
 	}
 	return nil
 }

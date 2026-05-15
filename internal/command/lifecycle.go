@@ -398,8 +398,22 @@ func RunRm(env *Env, args []string) error {
 		}
 	}
 
-	if err := gitio.WorktreeRemove(chosen.repo, chosen.path, force); err != nil {
-		return ExitWith(1, "worktree has uncommitted changes; use 'mt rm --force' to bypass")
+	err = gitio.WorktreeRemove(chosen.repo, chosen.path, force)
+	if errors.Is(err, gitio.ErrWorktreeDirty) {
+		// Dirty: ask. We're invoked from `tmux display-popup -E` for
+		// prefix+R, so the prompt keeps the popup open long enough for
+		// the user to read it; without this, any error vanished with
+		// the popup teardown.
+		fmt.Fprintf(env.Stderr, "%s has uncommitted changes. Force remove? [y/N] ", chosen.title)
+		var ans string
+		_, _ = fmt.Fscanln(env.Stdin, &ans)
+		if !strings.EqualFold(ans, "y") {
+			return ExitWith(0, "")
+		}
+		err = gitio.WorktreeRemove(chosen.repo, chosen.path, true)
+	}
+	if err != nil {
+		return ExitWith(1, "%v", err)
 	}
 
 	branch := filepath.Base(chosen.path)

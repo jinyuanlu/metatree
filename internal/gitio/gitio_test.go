@@ -371,8 +371,12 @@ func TestWorktreeRemoveDirtyRefuses(t *testing.T) {
 		t.Fatalf("modify README: %v", err)
 	}
 
-	if err := WorktreeRemove(repo, wt, false); err == nil {
+	err := WorktreeRemove(repo, wt, false)
+	if err == nil {
 		t.Fatalf("WorktreeRemove(force=false) on dirty tree returned nil; want error")
+	}
+	if !errors.Is(err, ErrWorktreeDirty) {
+		t.Fatalf("WorktreeRemove(force=false) on dirty tree returned %v; want ErrWorktreeDirty", err)
 	}
 	// Worktree directory should still exist.
 	if _, err := os.Stat(wt); err != nil {
