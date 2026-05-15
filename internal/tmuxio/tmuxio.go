@@ -295,6 +295,20 @@ func SetSessionOption(session SessionName, key, value string) error {
 	return nil
 }
 
+// GetSessionOption reads a per-session option's value. Returns ("", nil)
+// when the option is unset (tmux distinguishes "unset" from "set to
+// empty"; using `-v` we ask for the value alone, and an unset option
+// fails the command — collapsed to empty string for callers).
+func GetSessionOption(session SessionName, key string) (string, error) {
+	out, err := run("show-option", "-v", "-t", string(session), key)
+	if err != nil {
+		// Most likely "option not set" — treat as empty. Real failures
+		// (session gone) surface in the next operation anyway.
+		return "", nil
+	}
+	return out, nil
+}
+
 // TileLayout applies the "tiled" layout to the target window.
 func TileLayout(target string) error {
 	if err := runQuiet("select-layout", "-t", target, "tiled"); err != nil {

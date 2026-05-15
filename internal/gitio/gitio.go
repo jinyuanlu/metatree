@@ -326,31 +326,55 @@ func DiscoverWorktrees(reposDirs, explicitRepos []string) ([]Worktree, error) {
 		return nil, fmt.Errorf("discover repos: %w", err)
 	}
 
+	// Fan out per-repo `git worktree list` calls. Each fork + git startup
+	// is ~3-5 ms; serialising 40+ repos burns 150-200 ms on a typical
+	// dev machine and dominates `mt switch` popup latency. The work is
+	// I/O-bound and independent, so a goroutine per repo collapses total
+	// wall time to ≈max(per-call) — sub-15 ms in practice.
+	type job struct {
+		resolved string
+		entries  []string
+	}
+	jobs := make([]job, len(repos))
+	var wg sync.WaitGroup
+	for i, repo := range repos {
+		wg.Add(1)
+		go func(i int, repo string) {
+			defer wg.Done()
+			resolved, err := canonical(repo)
+			if err != nil {
+				// Repo that can't be canonicalized (permission denied,
+				// vanished mid-walk, …) is not a hard error — same
+				// behaviour as bash's `cd ... || continue`.
+				return
+			}
+			entries, err := worktreeListPorcelain(repo)
+			if err != nil {
+				// One bad repo (corrupted .git, permission error)
+				// shouldn't kill the whole listing — mirror bash's
+				// `|| true`.
+				return
+			}
+			jobs[i] = job{resolved: resolved, entries: entries}
+		}(i, repo)
+	}
+	wg.Wait()
+
 	var out []Worktree
-	for _, repo := range repos {
-		resolved, err := canonical(repo)
-		if err != nil {
-			// A repo that can't be canonicalized (e.g. permission denied)
-			// is not a hard error for the listing — skip it the same way
-			// the bash version skips on `cd ... || continue`.
+	for _, j := range jobs {
+		if j.resolved == "" {
 			continue
 		}
-		entries, err := worktreeListPorcelain(repo)
-		if err != nil {
-			// One bad repo (corrupted .git, permission error) shouldn't
-			// kill the whole listing — mirror the bash `|| true`.
-			continue
-		}
-		for _, wt := range entries {
+		for _, wt := range j.entries {
 			wtCanon, err := canonical(wt)
 			if err != nil {
 				continue
 			}
-			if wtCanon == resolved {
+			if wtCanon == j.resolved {
 				// Skip the main worktree.
 				continue
 			}
-			out = append(out, Worktree{Repo: resolved, Path: wtCanon})
+			out = append(out, Worktree{Repo: j.resolved, Path: wtCanon})
 		}
 	}
 	return out, nil

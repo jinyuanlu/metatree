@@ -51,10 +51,30 @@ const statusRightFormat = `#[fg=cyan]#{?@mt-managed,#{@mt-managed},(no mt pane)}
 //
 // Returns a "first-install" notice string when the bindings were just
 // installed (caller should print it to stderr); empty string otherwise.
+// MtInitializedKey is the per-session user option mt sets once chrome,
+// bindings, and the anchor are all in place. On subsequent invocations,
+// its presence short-circuits the warm-path setup (it survives the
+// tmux server's lifetime; restarting tmux clears it naturally).
+const MtInitializedKey = "@mt-initialized"
+
 func Ensure(cfg *config.Config, mtPath string) (string, error) {
 	session := tmuxio.SessionName(cfg.TmuxSession)
 	window := tmuxio.WindowName(cfg.TmuxWindow)
+	target := string(session) + ":" + string(window)
 
+	// Fast path: every `mt switch` from prefix+g lands here. Skipping
+	// applyChrome, the bindings-installed probe, and EnsureWindow shaves
+	// ~25ms of fork+exec overhead off the popup. The anchor invariant
+	// still gets checked — it's the one thing the user can break.
+	if v, _ := tmuxio.GetSessionOption(session, MtInitializedKey); v == "1" {
+		if err := ensureAnchor(target); err != nil {
+			return "", fmt.Errorf("ensure anchor pane: %w", err)
+		}
+		return "", nil
+	}
+
+	// Cold path: first mt invocation against this tmux server (or first
+	// since the server restarted).
 	if err := tmuxio.EnsureSession(session, window); err != nil {
 		if errors.Is(err, tmuxio.ErrUnavailable) {
 			return "", fmt.Errorf(
@@ -73,7 +93,6 @@ func Ensure(cfg *config.Config, mtPath string) (string, error) {
 		}
 	}
 
-	target := string(session) + ":" + string(window)
 	if err := ensureAnchor(target); err != nil {
 		return "", fmt.Errorf("ensure anchor pane: %w", err)
 	}
@@ -85,6 +104,12 @@ func Ensure(cfg *config.Config, mtPath string) (string, error) {
 			notice = "mt: installed prefix+g/G/N/R bindings on this tmux server"
 		}
 	}
+
+	// Mark this session as fully initialized so future invocations take
+	// the fast path. Best-effort: a failure here only slows the next
+	// call by ~25ms, doesn't break anything.
+	_ = tmuxio.SetSessionOption(session, MtInitializedKey, "1")
+
 	return notice, nil
 }
 
