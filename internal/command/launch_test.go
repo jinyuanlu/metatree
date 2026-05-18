@@ -356,3 +356,54 @@ func TestNew_WorktreeBase_HeadModePrintedBeforeCopyLine(t *testing.T) {
 		t.Errorf("`mt: branched` must precede `mt: copied`; got:\n%s", out)
 	}
 }
+
+// ----------------------------------------------------------------------
+// case-insensitive FS path comparison (samePath / isRegisteredWorktree)
+// ----------------------------------------------------------------------
+
+// caseInsensitiveTmp reports whether t.TempDir lives on a case-insensitive
+// filesystem. Linux ext4/xfs are case-sensitive; macOS APFS defaults to
+// case-insensitive. The bug we're regressing only manifests on the latter.
+func caseInsensitiveTmp(t *testing.T) bool {
+	t.Helper()
+	probe := filepath.Join(t.TempDir(), "Probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	_, err := os.Stat(filepath.Join(filepath.Dir(probe), "probe"))
+	return err == nil
+}
+
+// On macOS APFS, a repo discovered under "/Users/admin/dev/foo" can have
+// worktrees registered as "/Users/admin/Dev/foo/.worktrees/x" — same dir
+// on disk, different string. isRegisteredWorktree used to compare by
+// EvalSymlinks-resolved string, which preserves case, so the registered
+// worktree looked unregistered and `mt switch` of a dead row crashed
+// with "path exists" instead of resuming.
+func TestIsRegisteredWorktree_CaseInsensitiveParent(t *testing.T) {
+	if !caseInsensitiveTmp(t) {
+		t.Skip("case-sensitive filesystem; bug only repros on APFS/NTFS")
+	}
+	parent := t.TempDir()
+	repo := newBaseRepo(t, parent)
+	wtPath := filepath.Join(repo, ".worktrees", "feature")
+	gitOrFatal(t, repo, "worktree", "add", "-b", "mt/feature", wtPath)
+
+	// Flip the case of one path component above the repo. The actual
+	// directory entry is unchanged; we're handing isRegisteredWorktree
+	// a different *spelling* of the same path, the way a user's lowercase
+	// repos_dirs entry collides with git's stored capital-D registration.
+	parentBase := filepath.Base(parent)
+	flipped := strings.ToUpper(parentBase[:1]) + parentBase[1:]
+	if flipped == parentBase {
+		flipped = strings.ToLower(parentBase[:1]) + parentBase[1:]
+	}
+	wtFlipped := filepath.Join(filepath.Dir(parent), flipped, "repo", ".worktrees", "feature")
+	if _, err := os.Stat(wtFlipped); err != nil {
+		t.Skipf("case-flip didn't resolve on this fs: %v", err)
+	}
+
+	if !isRegisteredWorktree(repo, wtFlipped) {
+		t.Fatalf("isRegisteredWorktree(%q, %q) = false; want true (paths reference the same inode)", repo, wtFlipped)
+	}
+}

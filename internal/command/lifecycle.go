@@ -206,15 +206,34 @@ func RunNew(env *Env, args []string) error {
 	return tmuxio.AttachOrSwitch(env.Target())
 }
 
+// samePath reports whether a and b name the same filesystem entry.
+// Uses os.SameFile (inode comparison) so the check transparently handles
+// symlinks, case-insensitive filesystems (macOS APFS, Windows NTFS), and
+// bind mounts — string equality after EvalSymlinks misses all three on
+// macOS, where EvalSymlinks preserves whatever case the caller passed in.
+// Falls back to string equality if either path can't be stat'd.
+func samePath(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
+}
+
 // isRegisteredWorktree reports whether worktreePath is an existing git
-// worktree of repo, comparing canonical (EvalSymlinks-resolved) paths.
+// worktree of repo. Path identity is by inode (samePath) so a case
+// mismatch between user config and git's stored worktree path doesn't
+// produce a false negative on case-insensitive filesystems.
 // Used by RunNew to detect respawn vs first-create.
 func isRegisteredWorktree(repo, worktreePath string) bool {
 	if !fileExists(worktreePath) {
-		return false
-	}
-	resolved, err := filepath.EvalSymlinks(worktreePath)
-	if err != nil {
 		return false
 	}
 	wts, err := gitio.DiscoverWorktrees(nil, []string{repo})
@@ -222,7 +241,7 @@ func isRegisteredWorktree(repo, worktreePath string) bool {
 		return false
 	}
 	for _, w := range wts {
-		if w.Path == resolved {
+		if samePath(w.Path, worktreePath) {
 			return true
 		}
 	}
@@ -234,17 +253,12 @@ func isRegisteredWorktree(repo, worktreePath string) bool {
 // pattern. startPoint is the resolved ref to branch from ("" = parent HEAD).
 func ensureWorktree(repo, fullBranch, worktreePath, startPoint string) error {
 	if fileExists(worktreePath) {
-		// Verify git knows about this path (resolve symlinks both sides)
-		resolved, err := filepath.EvalSymlinks(worktreePath)
-		if err != nil {
-			return ExitWith(1, "resolve %s: %v", worktreePath, err)
-		}
 		wts, err := gitio.DiscoverWorktrees(nil, []string{repo})
 		if err != nil {
 			return ExitWith(1, "list worktrees: %v", err)
 		}
 		for _, w := range wts {
-			if w.Path == resolved {
+			if samePath(w.Path, worktreePath) {
 				return nil // exists and registered — reuse
 			}
 		}
