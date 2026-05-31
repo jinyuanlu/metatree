@@ -345,6 +345,53 @@ func TestBindPrefix(t *testing.T) {
 	}
 }
 
+func TestZoomPaneIdempotent(t *testing.T) {
+	f := newFixture(t)
+	defer f.cleanup(t)
+
+	const sess = SessionName("mt-test")
+	const win = WindowName("dash")
+	target := string(sess) + ":" + string(win)
+	if err := EnsureSession(sess, win); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+
+	// Zoom is a window-level state that only has meaning with >1 pane.
+	// The split pane becomes active, which is what ZoomPane targets.
+	id, err := SplitPane(target, "", "sleep 30")
+	if err != nil {
+		t.Fatalf("SplitPane: %v", err)
+	}
+
+	if zoomed, err := windowZoomed(id); err != nil {
+		t.Fatalf("windowZoomed (initial): %v", err)
+	} else if zoomed {
+		t.Fatalf("window zoomed before ZoomPane; want unzoomed")
+	}
+
+	// First call zooms in.
+	if err := ZoomPane(id); err != nil {
+		t.Fatalf("ZoomPane (first): %v", err)
+	}
+	if zoomed, err := windowZoomed(id); err != nil {
+		t.Fatalf("windowZoomed (after first): %v", err)
+	} else if !zoomed {
+		t.Fatalf("ZoomPane did not zoom in")
+	}
+
+	// Second call must be a no-op, NOT a toggle back out. This is the
+	// regression: `mt switch -z` (prefix+g) onto an already-zoomed pane
+	// must stay zoomed, not flip out.
+	if err := ZoomPane(id); err != nil {
+		t.Fatalf("ZoomPane (second): %v", err)
+	}
+	if zoomed, err := windowZoomed(id); err != nil {
+		t.Fatalf("windowZoomed (after second): %v", err)
+	} else if !zoomed {
+		t.Fatalf("second ZoomPane toggled zoom OFF; want still zoomed (idempotent)")
+	}
+}
+
 func TestInsideTmuxFromEnv(t *testing.T) {
 	// This test does not need the fixture (no tmux server interaction),
 	// but we still skip if tmux isn't on PATH so the suite has a single

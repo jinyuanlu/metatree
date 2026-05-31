@@ -263,8 +263,35 @@ func SelectPane(id PaneID) error {
 	return nil
 }
 
-// ZoomPane toggles zoom on the given pane (resize-pane -Z).
+// windowZoomed reports whether the window containing id is currently
+// zoomed (the resize-pane -Z fullscreen state).
+func windowZoomed(id PaneID) (bool, error) {
+	out, err := run("display-message", "-p", "-t", string(id), "#{window_zoomed_flag}")
+	if err != nil {
+		return false, err
+	}
+	return out == "1", nil
+}
+
+// ZoomPane ensures the window containing id is zoomed to fullscreen,
+// idempotently.
+//
+// tmux's `resize-pane -Z` TOGGLES zoom, so calling it when the window is
+// already zoomed flips it back OUT. mt's only caller is the `-z` flag of
+// `mt switch` (prefix+g), whose intent is unambiguously "zoom in" — a
+// blind toggle zoomed you back out whenever you landed on the pane you
+// were already focused on. We guard on window_zoomed_flag: already-zoomed
+// is a no-op, otherwise we toggle on. (RunSwitch calls SelectPane first,
+// and tmux auto-unzooms on an active-pane change, so the flag reflects
+// the target pane, not whatever was zoomed before.)
 func ZoomPane(id PaneID) error {
+	zoomed, err := windowZoomed(id)
+	if err != nil {
+		return err
+	}
+	if zoomed {
+		return nil
+	}
 	if err := runQuiet("resize-pane", "-t", string(id), "-Z"); err != nil {
 		return fmt.Errorf("tmux resize-pane -t %s -Z: %w", id, err)
 	}
